@@ -1,0 +1,32 @@
+# KuaiRec-specific overrides
+# Extends base.yaml — only set values that differ from base
+
+data:
+  source: kuairec
+  kuairec:
+    # Download from https://kuairec.com/ and place files here
+    raw_dir: data/raw/kuairec
+    # interaction_file: big_matrix.csv        # 12.5M interactions (Tier 2)
+    interaction_file: small_matrix.csv        # dense 1K×1K subset (Tier 1 dev)
+    item_features_file: item_categories.csv
+    item_daily_features_file: item_daily_features.csv
+    user_features_file: user_features.csv
+    social_network_file: social_network.csv
+
+    # KuaiRec source column → canonical column mapping
+    # NOTE: the loader uses _INTERACTION_MAP for interactions; this documents
+    # the full mapping for reference and future use.
+    column_map:
+      user_id: user_id       # source → canonical
+      video_id: item_id
+      timestamp: timestamp
+      watch_ratio: watch_ratio
+      is_like: like
+      is_comment: comment
+      is_share: share
+      is_follow: follow
+
+    # watch_ratio in KuaiRec can exceed 1.0 (replays); clip to [0, 1]
+    clip_watch_ratio: true
+    min_interactions_per_user: 5
+    min_interactions_per_item: 5

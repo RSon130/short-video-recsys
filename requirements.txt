@@ -1,0 +1,22 @@
+# Core — torch and faiss are NOT listed here.
+# Local dev: managed by conda (environment.yml).
+# Docker: torch comes from the base image; faiss installed in Dockerfile.
+numpy>=1.26
+pandas>=2.1
+pyarrow>=14.0
+scikit-learn>=1.4
+scipy>=1.12
+
+# Config
+pyyaml>=6.0
+omegaconf>=2.3
+
+# Serving
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+redis>=5.0
+httpx>=0.27
+
+# Misc
+tqdm>=4.66

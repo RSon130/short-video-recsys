@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# data & artifacts
+datastore/raw/
+datastore/processed/
+checkpoints/
+logs/
+*.npy
+*.pt
+*.pkl
+*.parquet
+
+# env
+.env
+.venv/
+venv/
+*.egg-info/
+
+# os
+.DS_Store
+Thumbs.db

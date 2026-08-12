@@ -1,0 +1,98 @@
+# Base configuration — data-source agnostic
+# Override in a data-source-specific config (e.g. kuairec.yaml)
+
+project:
+  name: youtube-shorts-recsys
+  version: "1.0"
+  seed: 42
+
+data:
+  source: kuairec           # swap to: simulator | custom
+  raw_dir: data/raw
+  processed_dir: data/processed
+  train_ratio: 0.8
+  val_ratio: 0.1
+  # test_ratio = 1 - train_ratio - val_ratio
+
+# Canonical column names — all data sources must map to these
+schema:
+  user_id: user_id
+  item_id: item_id
+  timestamp: timestamp
+  watch_ratio: watch_ratio   # 0-1, proxy for watch time
+  like: like                 # binary
+  comment: comment           # binary
+  share: share               # binary
+  follow: follow             # binary
+
+features:
+  user_emb_dim: 64
+  item_emb_dim: 64
+  user_dense_dim: 16         # dimension of user dense feature vector
+  item_dense_dim: 16         # dimension of item dense feature vector
+  session_len: 50            # max recent interactions to use as session context
+  num_neg_samples: 4         # negatives per positive for retrieval training
+
+two_tower:
+  tower_hidden: [256, 128]
+  embedding_dim: 64          # final output embedding (shared retrieval space)
+  dropout: 0.1
+  temperature: 0.07          # contrastive loss temperature
+
+ranking:
+  transformer_heads: 4
+  transformer_layers: 2
+  d_model: 128
+  ffn_dim: 256
+  dropout: 0.1
+  # multi-task heads
+  tasks:
+    - name: watch_time
+      weight: 0.5
+      loss: mse
+    - name: like
+      weight: 0.3
+      loss: bce
+    - name: diversity
+      weight: 0.2
+      loss: custom
+
+training:
+  retrieval:
+    epochs: 20
+    batch_size: 1024
+    lr: 1e-3
+    weight_decay: 1e-5
+    device: auto            # auto | cpu | cuda
+    checkpoint_dir: checkpoints/retrieval
+  ranking:
+    epochs: 30
+    batch_size: 512
+    lr: 5e-4
+    weight_decay: 1e-5
+    device: auto
+    checkpoint_dir: checkpoints/ranking
+
+retrieval:
+  faiss_index_type: IVFFlat  # Flat | IVFFlat | IVFPQ
+  nlist: 100                 # IVF clusters
+  nprobe: 10                 # clusters to search at query time
+  top_k_recall: 200          # candidates passed to ranker
+  index_path: data/processed/faiss.index
+
+serving:
+  host: 0.0.0.0
+  port: 8000
+  top_k_final: 20           # final recommendations returned
+  redis_host: localhost
+  redis_port: 6379
+  redis_ttl_seconds: 300
+
+evaluation:
+  k_values: [5, 10, 20]
+  diversity_alpha: 0.5       # weight for intra-list diversity
+  ab_test_traffic_split: 0.5
+
+monitoring:
+  log_dir: logs
+  metrics_port: 9090         # Prometheus scrape port
