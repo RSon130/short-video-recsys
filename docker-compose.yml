@@ -1,11 +1,14 @@
-version: "3.9"
+# GPU compose — for Tier 2 (big_matrix, ~12.5M rows), where GPU training pays off.
+# For Tier 1 use docker-compose.cpu.yml; see Dockerfile.cpu for the rationale.
 services:
   api:
     build: .
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
+      # datastore/, not data/ — data/ is the loader *package*, and mounting over
+      # it would shadow the code with the host copy.
+      - ./datastore:/app/datastore
       - ./checkpoints:/app/checkpoints
       - ./logs:/app/logs
     environment:

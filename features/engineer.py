@@ -69,7 +69,7 @@ def run(cfg: dict) -> None:
            to contiguous integers, returns a FeatureStore.
         3. Apply temporal_split() — splits interactions by timestamp percentile
            to guarantee no future data leaks into training.
-        4. Persist all outputs to data/processed/:
+        4. Persist all outputs to datastore/processed/:
                interactions/train.parquet
                interactions/val.parquet
                interactions/test.parquet

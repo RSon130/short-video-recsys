@@ -20,6 +20,7 @@ from data.schema import Cols
 from evaluation.metrics import evaluate_at_k_values, watch_time_auc
 from evaluation.ab_test import run_ab_test
 from features.engineer import load_config
+from features.dense_features import DenseFeatureStore
 from models.ranker import build_ranker
 from retrieval.faiss_index import load_index, query_index
 
@@ -44,22 +45,23 @@ def main():
     # ------------------------------------------------------------------
     # Load artifacts
     # ------------------------------------------------------------------
-    with open("data/processed/id_maps.pkl", "rb") as f:
+    with open("datastore/processed/id_maps.pkl", "rb") as f:
         id_maps = pickle.load(f)
 
-    user_embs = np.load("data/processed/user_embeddings.npy")
-    item_embs = np.load("data/processed/item_embeddings.npy")
+    user_embs = np.load("datastore/processed/user_embeddings.npy")
+    item_embs = np.load("datastore/processed/item_embeddings.npy")
     index = load_index(cfg["retrieval"]["index_path"])
 
-    user_dense_dim = id_maps.get("user_dense_dim", cfg["features"]["user_dense_dim"])
-    item_dense_dim = id_maps.get("item_dense_dim", cfg["features"]["item_dense_dim"])
-    ranker = build_ranker(cfg, user_dense_dim, item_dense_dim)
+    # Dense features are assembled by the same code path used in training —
+    # see features/dense_features.py.
+    features = DenseFeatureStore.load()
+    ranker = build_ranker(cfg, features.user_dense_dim, features.item_dense_dim)
     ranker.load_state_dict(
-        torch.load("data/processed/ranker_model.pt", map_location="cpu", weights_only=True)
+        torch.load("datastore/processed/ranker_model.pt", map_location="cpu", weights_only=True)
     )
     ranker.eval()
 
-    test_df = pd.read_parquet("data/processed/interactions/test.parquet")
+    test_df = pd.read_parquet("datastore/processed/interactions/test.parquet")
     ground_truth = build_ground_truth(test_df)
     users = list(ground_truth.keys())
 
@@ -69,8 +71,6 @@ def main():
     # ------------------------------------------------------------------
     # Per-user retrieval + ranking
     # ------------------------------------------------------------------
-    user_dense = np.zeros(user_dense_dim, dtype=np.float32)
-
     recommended_lists = []
     retrieval_score_rows = []   # for A/B: (uid, iid, retrieval_score)
     ranker_score_rows = []      # for A/B: (uid, iid, ranker_score)
@@ -80,18 +80,15 @@ def main():
         u_emb = user_embs[uid]
         scores, indices = query_index(index, u_emb, top_k=top_k_recall)
 
-        # Ranker re-scoring
-        ranked = []
-        for iid, ret_score in zip(indices, scores):
-            i_emb = item_embs[iid]
-            item_dense = np.zeros(item_dense_dim, dtype=np.float32)
-            x = torch.from_numpy(
-                np.concatenate([u_emb, i_emb, user_dense, item_dense]).astype(np.float32)
-            ).unsqueeze(0)
-            with torch.no_grad():
-                rank_score = float(ranker(x).item())
-            ranked.append((iid, ret_score, rank_score))
+        # Score all candidates in one batched forward pass.
+        x = torch.from_numpy(features.build_batch(u_emb, item_embs, uid, indices))
+        with torch.no_grad():
+            rank_scores = ranker(x).squeeze(-1).numpy()
 
+        ranked = [
+            (int(iid), float(ret_score), float(rank_score))
+            for iid, ret_score, rank_score in zip(indices, scores, rank_scores)
+        ]
         ranked.sort(key=lambda t: t[2], reverse=True)
         recommended_lists.append([r[0] for r in ranked[:top_k_final]])
 

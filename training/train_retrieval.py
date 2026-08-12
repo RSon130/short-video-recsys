@@ -129,10 +129,10 @@ def train(cfg):
     Args:
         cfg: Merged config dict.
     """
-    with open("data/processed/id_maps.pkl", "rb") as f:
+    with open("datastore/processed/id_maps.pkl", "rb") as f:
         id_maps = pickle.load(f)
 
-    train_df = pd.read_parquet("data/processed/interactions/train.parquet")
+    train_df = pd.read_parquet("datastore/processed/interactions/train.parquet")
 
     n_items = id_maps["n_items"]
     n_users = id_maps["n_users"]
@@ -201,7 +201,7 @@ def train(cfg):
         item_dense_all = torch.zeros(n_items, item_dense_dim).to(device)
         item_embs = model.item_tower(all_item_ids, item_dense_all).cpu().numpy()
 
-    item_emb_path = "data/processed/item_embeddings.npy"
+    item_emb_path = "datastore/processed/item_embeddings.npy"
     np.save(item_emb_path, item_embs)
     print(f"Saved item embeddings: {item_emb_path}")
 
@@ -211,7 +211,7 @@ def train(cfg):
         user_dense_all = torch.zeros(n_users, user_dense_dim).to(device)
         user_embs = model.user_tower(all_user_ids, user_dense_all).cpu().numpy()
 
-    user_emb_path = "data/processed/user_embeddings.npy"
+    user_emb_path = "datastore/processed/user_embeddings.npy"
     np.save(user_emb_path, user_embs)
     print(f"Saved user embeddings: {user_emb_path}")
 

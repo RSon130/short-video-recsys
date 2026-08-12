@@ -5,7 +5,7 @@ data:
   source: kuairec
   kuairec:
     # Download from https://kuairec.com/ and place files here
-    raw_dir: data/raw/kuairec
+    raw_dir: datastore/raw/kuairec
     # interaction_file: big_matrix.csv        # 12.5M interactions (Tier 2)
     interaction_file: small_matrix.csv        # dense 1K×1K subset (Tier 1 dev)
     item_features_file: item_categories.csv

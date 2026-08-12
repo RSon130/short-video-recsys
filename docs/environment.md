@@ -21,7 +21,7 @@
 | `environment.yml` | Conda env `recsys` with GPU FAISS + pip deps |
 | `Dockerfile` | Lean GPU serving image |
 | `docker-compose.yml` | Tier 1 serving with NVIDIA device reservation; Redis commented out for Tier 2 |
-| `.dockerignore` | Excludes .git, __pycache__, data/raw/, .env, checkpoints/, logs/ |
+| `.dockerignore` | Excludes .git, __pycache__, datastore/raw/, .env, checkpoints/, logs/ |
 
 ## Bootstrap: Local Environment
 ```powershell

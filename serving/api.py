@@ -16,6 +16,7 @@ import yaml
 from fastapi import FastAPI, HTTPException
 
 from data.schema import RecommendRequest, RecommendResponse, ItemScore
+from features.dense_features import DenseFeatureStore
 from models.two_tower import build_model
 from models.ranker import build_ranker
 from retrieval.faiss_index import query_index, load_index
@@ -26,6 +27,8 @@ _item_embeddings = None
 _user_embeddings = None
 _id_maps = None
 _ranker = None
+_features = None        # DenseFeatureStore — shared with training/eval
+_inv_item_map = None    # internal item index -> original dataset item_id
 _cache: dict = {}   # user_id -> (RecommendResponse, expiry_float)
 
 logger = logging.getLogger("recsys.api")
@@ -67,15 +70,22 @@ def _load_artifacts(cfg: dict) -> None:
     blocking file I/O does not run inside the async event loop.
     """
     global _index, _item_embeddings, _user_embeddings, _id_maps, _ranker
-    with open("data/processed/id_maps.pkl", "rb") as f:
+    global _features, _inv_item_map
+    with open("datastore/processed/id_maps.pkl", "rb") as f:
         _id_maps = pickle.load(f)
-    _item_embeddings = np.load("data/processed/item_embeddings.npy")
-    _user_embeddings = np.load("data/processed/user_embeddings.npy")
+    _item_embeddings = np.load("datastore/processed/item_embeddings.npy")
+    _user_embeddings = np.load("datastore/processed/user_embeddings.npy")
     _index = load_index(cfg["retrieval"]["index_path"])
-    user_dense_dim = _id_maps.get("user_dense_dim", cfg["features"]["user_dense_dim"])
-    item_dense_dim = _id_maps.get("item_dense_dim", cfg["features"]["item_dense_dim"])
-    ranker = build_ranker(cfg, user_dense_dim, item_dense_dim)
-    ranker.load_state_dict(torch.load("data/processed/ranker_model.pt", map_location="cpu", weights_only=True))
+
+    # Inverted once at startup, not per request — rebuilding it inside the
+    # request path is O(n_items) of pure overhead on every call.
+    _inv_item_map = {v: k for k, v in _id_maps["item_id_map"].items()}
+
+    # Same feature assembly as training and evaluation — see
+    # features/dense_features.py.
+    _features = DenseFeatureStore.load()
+    ranker = build_ranker(cfg, _features.user_dense_dim, _features.item_dense_dim)
+    ranker.load_state_dict(torch.load("datastore/processed/ranker_model.pt", map_location="cpu", weights_only=True))
     ranker.eval()
     _ranker = ranker
 
@@ -181,27 +191,20 @@ async def recommend(request: RecommendRequest) -> RecommendResponse:
     top_k_recall = _cfg["retrieval"]["top_k_recall"]
     _, item_indices = query_index(_index, user_emb, top_k=top_k_recall)
 
-    user_dense_dim = _id_maps.get("user_dense_dim", _cfg["features"]["user_dense_dim"])
-    item_dense_dim = _id_maps.get("item_dense_dim", _cfg["features"]["item_dense_dim"])
-    user_dense = np.zeros(user_dense_dim, dtype=np.float32)
+    # All candidates scored in a single batched forward pass — one call per
+    # candidate is dominated by per-call PyTorch overhead at 200 candidates.
+    x = torch.from_numpy(
+        _features.build_batch(user_emb, _item_embeddings, internal_uid, item_indices)
+    )
+    with torch.no_grad():
+        rank_scores = _ranker(x).squeeze(-1).numpy()
 
-    ranked = []
-    for iid in item_indices:
-        i_emb = _item_embeddings[iid]
-        item_dense = np.zeros(item_dense_dim, dtype=np.float32)
-        x = torch.from_numpy(
-            np.concatenate([user_emb, i_emb, user_dense, item_dense]).astype(np.float32)
-        ).unsqueeze(0)
-        with torch.no_grad():
-            rank_score = float(_ranker(x).item())
-        ranked.append((iid, rank_score))
-
+    ranked = [(int(iid), float(s)) for iid, s in zip(item_indices, rank_scores)]
     ranked.sort(key=lambda t: t[1], reverse=True)
     top = ranked[:request.top_k]
 
-    inv_item_map = {v: k for k, v in _id_maps["item_id_map"].items()}
     recommendations = [
-        ItemScore(item_id=inv_item_map.get(iid, iid), score=score, rank=rank + 1)
+        ItemScore(item_id=_inv_item_map.get(iid, iid), score=score, rank=rank + 1)
         for rank, (iid, score) in enumerate(top)
     ]
 

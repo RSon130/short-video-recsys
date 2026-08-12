@@ -1,0 +1,23 @@
+# CPU compose — default for Tier 1.
+#
+#   docker compose -f docker-compose.cpu.yml build
+#   docker compose -f docker-compose.cpu.yml run --rm api python features/engineer.py
+#   docker compose -f docker-compose.cpu.yml up api
+#
+# The whole project is bind-mounted at /app so edits on the host take effect
+# without a rebuild — the pipeline is still being debugged, so the edit/run loop
+# needs to stay tight. The image is rebuilt only when dependencies change.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: short-video-recsys:cpu
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1

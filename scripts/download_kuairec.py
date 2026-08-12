@@ -1,5 +1,5 @@
 """
-Download KuaiRec dataset files to data/raw/kuairec/.
+Download KuaiRec dataset files to datastore/raw/kuairec/.
 
 Usage:
     python scripts/download_kuairec.py --subset small

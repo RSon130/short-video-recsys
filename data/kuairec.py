@@ -2,7 +2,7 @@
 KuaiRec data loader.
 
 Downloads: https://kuairec.com/
-Expected files in data/raw/kuairec/:
+Expected files in datastore/raw/kuairec/:
     big_matrix.csv          (or small_matrix.csv for dev)
     item_categories.csv
     item_daily_features.csv

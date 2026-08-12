@@ -17,6 +17,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 from features.engineer import load_config
+from features.dense_features import DenseFeatureStore
 from models.ranker import build_ranker
 from data.schema import Cols
 
@@ -48,16 +49,11 @@ class RankingDataset(Dataset):
         self.user_embs = user_embs
         self.item_embs = item_embs
 
-        self.user_feat_map = {
-            int(row[Cols.USER_ID]): row.drop(Cols.USER_ID).values.astype(np.float32)
-            for _, row in user_features.iterrows()
-        }
-        self.item_feat_map = {
-            int(row[Cols.ITEM_ID]): row.drop(Cols.ITEM_ID).values.astype(np.float32)
-            for _, row in item_features.iterrows()
-        }
-        self.user_dense_dim = user_features.shape[1] - 1
-        self.item_dense_dim = item_features.shape[1] - 1
+        # Shared with evaluation and serving — see features/dense_features.py for
+        # why the input layout lives in one place.
+        self.features = DenseFeatureStore(user_features, item_features)
+        self.user_dense_dim = self.features.user_dense_dim
+        self.item_dense_dim = self.features.item_dense_dim
 
     def __len__(self):
         return len(self.records)
@@ -66,13 +62,9 @@ class RankingDataset(Dataset):
         uid, iid, label = self.records[idx]
         uid, iid = int(uid), int(iid)
 
-        u_emb = self.user_embs[uid]
-        i_emb = self.item_embs[iid]
-
-        u_row = self.user_feat_map.get(uid, np.zeros(self.user_dense_dim, dtype=np.float32))
-        i_row = self.item_feat_map.get(iid, np.zeros(self.item_dense_dim, dtype=np.float32))
-
-        x = np.concatenate([u_emb, i_emb, u_row, i_row]).astype(np.float32)
+        x = self.features.build_input(
+            self.user_embs[uid], self.item_embs[iid], uid, iid
+        )
         return {
             "x": torch.from_numpy(x),
             "label": torch.tensor(label, dtype=torch.float32),
@@ -101,7 +93,7 @@ def train(cfg):
         3. Instantiate MLPRanker and Adam optimiser.
         4. Train with MSELoss for cfg[training][ranking][epochs] epochs,
            logging loss per epoch.
-        5. Save ranker_model.pt to data/processed/ (loaded by serving API).
+        5. Save ranker_model.pt to datastore/processed/ (loaded by serving API).
         6. Save checkpoint to checkpoint_dir.
 
     Why train the ranker *after* the retrieval model?
@@ -111,11 +103,11 @@ def train(cfg):
     Args:
         cfg: Merged config dict.
     """
-    train_df = pd.read_parquet("data/processed/interactions/train.parquet")
-    user_embs = np.load("data/processed/user_embeddings.npy")
-    item_embs = np.load("data/processed/item_embeddings.npy")
-    user_features = pd.read_parquet("data/processed/user_features.parquet")
-    item_features = pd.read_parquet("data/processed/item_features.parquet")
+    train_df = pd.read_parquet("datastore/processed/interactions/train.parquet")
+    user_embs = np.load("datastore/processed/user_embeddings.npy")
+    item_embs = np.load("datastore/processed/item_embeddings.npy")
+    user_features = pd.read_parquet("datastore/processed/user_features.parquet")
+    item_features = pd.read_parquet("datastore/processed/item_features.parquet")
 
     dataset = RankingDataset(train_df, user_embs, item_embs, user_features, item_features)
     loader = DataLoader(dataset, batch_size=cfg["training"]["ranking"]["batch_size"], shuffle=True, num_workers=0)
@@ -152,7 +144,7 @@ def train(cfg):
         print(f"Epoch {epoch+1}/{epochs} — mse: {avg_loss:.6f} — {elapsed:.1f}s")
 
     # Save final model
-    torch.save(model.state_dict(), "data/processed/ranker_model.pt")
+    torch.save(model.state_dict(), "datastore/processed/ranker_model.pt")
 
     # Save checkpoint
     ckpt_dir = Path(cfg["training"]["ranking"]["checkpoint_dir"])

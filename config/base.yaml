@@ -8,8 +8,8 @@ project:
 
 data:
   source: kuairec           # swap to: simulator | custom
-  raw_dir: data/raw
-  processed_dir: data/processed
+  raw_dir: datastore/raw
+  processed_dir: datastore/processed
   train_ratio: 0.8
   val_ratio: 0.1
   # test_ratio = 1 - train_ratio - val_ratio
@@ -78,7 +78,7 @@ retrieval:
   nlist: 100                 # IVF clusters
   nprobe: 10                 # clusters to search at query time
   top_k_recall: 200          # candidates passed to ranker
-  index_path: data/processed/faiss.index
+  index_path: datastore/processed/faiss.index
 
 serving:
   host: 0.0.0.0

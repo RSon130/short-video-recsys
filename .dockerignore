@@ -1,8 +1,11 @@
 .git
+.gitattributes
 __pycache__
 *.pyc
 *.pyo
-data/raw/
+.pytest_cache
+datastore/raw/
+datastore/processed/
 .env
 *.egg-info
 checkpoints/
