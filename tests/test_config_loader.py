@@ -55,3 +55,22 @@ def test_real_config_exposes_keys_every_entry_point_reads():
     assert cfg["serving"]["cache_ttl_seconds"]
     assert cfg["retrieval"]["top_k_recall"]
     assert cfg["evaluation"]["k_values"]
+
+
+def test_numeric_hyperparameters_load_as_numbers():
+    """
+    YAML 1.1 only reads an exponent as a float when written 1.0e-3; bare 1e-3
+    loads as a str and blows up inside the optimiser with an unhelpful
+    TypeError. Guard every numeric hyperparameter that reaches PyTorch.
+    """
+    cfg = load_config("config/kuairec.yaml")
+
+    for stage in ("retrieval", "ranking"):
+        params = cfg["training"][stage]
+        assert isinstance(params["lr"], float), f"{stage}.lr is {type(params['lr'])}"
+        assert isinstance(params["weight_decay"], float)
+        assert isinstance(params["epochs"], int)
+        assert isinstance(params["batch_size"], int)
+
+    assert isinstance(cfg["two_tower"]["dropout"], float)
+    assert isinstance(cfg["ranking"]["dropout"], float)

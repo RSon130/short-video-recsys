@@ -52,19 +52,23 @@ ranking:
   dropout: 0.1
   # Single task: regress watch_ratio with MSE. Multi-task is future work.
 
+# Note on number formats: write learning rates as plain decimals (0.001), not
+# as 1e-3. PyYAML follows YAML 1.1, where an exponent needs a decimal point and
+# a signed exponent (1.0e-3) to be a float — bare 1e-3 loads as a *string* and
+# fails deep inside the optimiser with a confusing type error.
 training:
   retrieval:
     epochs: 20
     batch_size: 1024
-    lr: 1e-3
-    weight_decay: 1e-5
+    lr: 0.001
+    weight_decay: 0.00001
     device: auto            # auto | cpu | cuda
     checkpoint_dir: checkpoints/retrieval
   ranking:
     epochs: 30
     batch_size: 512
-    lr: 5e-4
-    weight_decay: 1e-5
+    lr: 0.0005
+    weight_decay: 0.00001
     device: auto
     checkpoint_dir: checkpoints/ranking
 

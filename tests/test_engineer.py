@@ -69,6 +69,10 @@ def test_run_calls_save_parquet_five_times(tmp_path):
             "source": "kuairec",
             "train_ratio": 0.8,
             "val_ratio": 0.1,
+            # run() resolves its output location from config; without this the
+            # pipeline would fall back to a hardcoded path (the bug that had it
+            # writing into the data/ package directory).
+            "processed_dir": str(tmp_path / "processed"),
             "kuairec": {
                 "raw_dir": str(tmp_path),
                 "interaction_file": "x.csv",
