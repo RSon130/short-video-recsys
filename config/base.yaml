@@ -1,8 +1,12 @@
-# Base configuration — data-source agnostic
-# Override in a data-source-specific config (e.g. kuairec.yaml)
+# Base configuration — data-source agnostic.
+# Override in a data-source-specific config (e.g. kuairec.yaml).
+#
+# This file describes the system that EXISTS. Settings for planned-but-unbuilt
+# work live in the "Future work" block at the bottom, commented out, so that
+# nothing here implies a component that isn't in the code.
 
 project:
-  name: youtube-shorts-recsys
+  name: short-video-recsys
   version: "1.0"
   seed: 42
 
@@ -28,34 +32,25 @@ schema:
 features:
   user_emb_dim: 64
   item_emb_dim: 64
-  user_dense_dim: 16         # dimension of user dense feature vector
-  item_dense_dim: 16         # dimension of item dense feature vector
-  session_len: 50            # max recent interactions to use as session context
+  # Fallbacks only. The real dense dimensions are derived from the processed
+  # parquet files at runtime (see features/dense_features.py) because the
+  # one-hot category expansion isn't known until the data is loaded.
+  user_dense_dim: 16
+  item_dense_dim: 16
   num_neg_samples: 4         # negatives per positive for retrieval training
 
 two_tower:
   tower_hidden: [256, 128]
   embedding_dim: 64          # final output embedding (shared retrieval space)
   dropout: 0.1
-  temperature: 0.07          # contrastive loss temperature
 
 ranking:
-  transformer_heads: 4
-  transformer_layers: 2
-  d_model: 128
-  ffn_dim: 256
+  # MLP ranker: hidden layer widths, then a 1-unit sigmoid head.
+  # These were previously named d_model / ffn_dim — Transformer vocabulary for
+  # what is a plain MLP. Renamed so the config matches the model.
+  hidden_dims: [256, 128]
   dropout: 0.1
-  # multi-task heads
-  tasks:
-    - name: watch_time
-      weight: 0.5
-      loss: mse
-    - name: like
-      weight: 0.3
-      loss: bce
-    - name: diversity
-      weight: 0.2
-      loss: custom
+  # Single task: regress watch_ratio with MSE. Multi-task is future work.
 
 training:
   retrieval:
@@ -74,25 +69,49 @@ training:
     checkpoint_dir: checkpoints/ranking
 
 retrieval:
-  faiss_index_type: IVFFlat  # Flat | IVFFlat | IVFPQ
-  nlist: 100                 # IVF clusters
-  nprobe: 10                 # clusters to search at query time
-  top_k_recall: 200          # candidates passed to ranker
+  # IndexFlatIP — exact inner-product search. At this item count exact search
+  # is ~1 ms, so an approximate index would add tuning burden for no gain.
+  # retrieval/faiss_index.py builds this unconditionally; there is deliberately
+  # no index_type switch until there is a second index to switch to.
+  top_k_recall: 200          # candidates passed to the ranker
   index_path: datastore/processed/faiss.index
 
 serving:
   host: 0.0.0.0
   port: 8000
-  top_k_final: 20           # final recommendations returned
-  redis_host: localhost
-  redis_port: 6379
-  redis_ttl_seconds: 300
+  top_k_final: 20            # default recommendations returned
+  cache_ttl_seconds: 300     # in-memory TTL cache
 
 evaluation:
   k_values: [5, 10, 20]
-  diversity_alpha: 0.5       # weight for intra-list diversity
   ab_test_traffic_split: 0.5
 
 monitoring:
   log_dir: logs
-  metrics_port: 9090         # Prometheus scrape port
+
+# ---------------------------------------------------------------------------
+# Future work — NOT implemented. Kept as a record of the planned upgrade path;
+# uncomment only alongside the code that reads it.
+#
+# retrieval:
+#   faiss_index_type: IVFFlat   # requires >~100K items to beat Flat
+#   nlist: 100
+#   nprobe: 10
+#
+# two_tower:
+#   temperature: 0.07           # InfoNCE only; unused by BPR
+#
+# ranking:
+#   transformer_heads: 4        # Transformer ranker
+#   transformer_layers: 2
+#   tasks:                      # multi-task heads
+#     - {name: watch_time, weight: 0.5, loss: mse}
+#     - {name: like,       weight: 0.3, loss: bce}
+#
+# serving:
+#   redis_host: localhost       # Redis replaces the in-memory cache
+#   redis_port: 6379
+#
+# monitoring:
+#   metrics_port: 9090          # Prometheus scrape port
+# ---------------------------------------------------------------------------

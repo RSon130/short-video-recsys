@@ -115,7 +115,7 @@ def _get_cache(user_id: int) -> RecommendResponse | None:
     Return a cached RecommendResponse for `user_id` if it has not expired.
 
     Cache entries are (response, expiry_timestamp) tuples stored in the
-    module-level `_cache` dict.  TTL is read from cfg[serving][redis_ttl_seconds].
+    module-level `_cache` dict.  TTL is read from cfg[serving][cache_ttl_seconds].
     Returns None on miss or expiry — caller must generate a fresh response.
     """
     entry = _cache.get(user_id)
@@ -131,7 +131,7 @@ def _set_cache(user_id: int, response: RecommendResponse) -> None:
     In production this would be replaced by a Redis call.  The in-process
     dict is sufficient for single-instance development/staging.
     """
-    ttl = _cfg["serving"]["redis_ttl_seconds"]
+    ttl = _cfg["serving"]["cache_ttl_seconds"]
     _cache[user_id] = (response, time.time() + ttl)
 
 

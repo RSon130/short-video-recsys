@@ -1,80 +1,136 @@
 """
-Download KuaiRec dataset files to datastore/raw/kuairec/.
+Download the KuaiRec dataset into datastore/raw/kuairec/.
+
+KuaiRec is distributed as a single ~432 MB zip archive, not as individual CSVs.
+(An earlier version of this script fetched per-file URLs from an Aliyun OSS
+bucket; those paths return 404 and never existed.) The canonical source is the
+Zenodo record linked from the official site, https://kuairec.com/.
 
 Usage:
-    python scripts/download_kuairec.py --subset small
-    python scripts/download_kuairec.py --subset big
+    python scripts/download_kuairec.py                 # small subset (Tier 1)
+    python scripts/download_kuairec.py --subset big    # adds big_matrix.csv
+    python scripts/download_kuairec.py --keep-archive  # don't delete the zip
 """
 import argparse
-import os
+import shutil
 import urllib.request
+import zipfile
 from pathlib import Path
 
-BASE_URL = "https://kuairec.oss-cn-beijing.aliyuncs.com/"
+ZENODO_RECORD = "18164998"
+ARCHIVE_URL = f"https://zenodo.org/records/{ZENODO_RECORD}/files/KuaiRec.zip"
 
+PROJECT_ROOT = Path(__file__).parent.parent
+
+# Files needed per subset. Names are matched against the archive's basenames,
+# so this survives changes to the directory layout inside the zip.
 SUBSET_FILES = {
-    "small": ["small_matrix.csv", "item_categories.csv", "user_features.csv"],
-    "big": ["big_matrix.csv", "item_categories.csv", "item_daily_features.csv", "user_features.csv"],
+    "small": [
+        "small_matrix.csv",
+        "item_categories.csv",
+        "user_features.csv",
+    ],
+    "big": [
+        "big_matrix.csv",
+        "small_matrix.csv",
+        "item_categories.csv",
+        "item_daily_features.csv",
+        "user_features.csv",
+    ],
 }
 
 
-def download_file(url: str, dest: Path) -> None:
-    """
-    Download a single file from `url` to `dest`, with a progress indicator.
-
-    Skips the download silently if the destination file already exists,
-    making the script safe to re-run without re-downloading completed files.
-
-    Uses urllib.request.urlretrieve (stdlib only — no extra dependencies)
-    with a reporthook that prints percentage progress on a single overwritten
-    line using carriage return.
-
-    Args:
-        url:  Full URL of the file to download.
-        dest: Local destination path (parent directory must already exist).
-    """
+def download_archive(dest: Path) -> None:
+    """Fetch KuaiRec.zip, printing progress. Re-runs skip a completed download."""
     if dest.exists():
-        print(f"Skipping {dest.name} — already exists")
+        print(f"Archive already present: {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
         return
 
-    filename = dest.name
+    # Only emit on a percentage change. urlretrieve calls the hook once per 8 KB
+    # block, which is ~53,000 calls for this archive — enough to bury real output
+    # in any captured log.
+    last_pct = -1
 
     def reporthook(block_num, block_size, total_size):
-        if total_size > 0:
-            pct = min(int(block_num * block_size * 100 / total_size), 100)
-            print(f"\r{filename}: {pct}%", end="", flush=True)
+        nonlocal last_pct
+        if total_size <= 0:
+            return
+        pct = min(int(block_num * block_size * 100 / total_size), 100)
+        if pct != last_pct:
+            last_pct = pct
+            got = block_num * block_size / 1e6
+            print(f"\rKuaiRec.zip: {pct}%  ({got:.0f}/{total_size / 1e6:.0f} MB)",
+                  end="", flush=True)
 
-    urllib.request.urlretrieve(url, dest, reporthook=reporthook)
+    # Download to a temp name so an interrupted transfer is never mistaken for
+    # a complete archive on the next run.
+    tmp = dest.with_suffix(".zip.part")
+    print(f"Downloading {ARCHIVE_URL}")
+    urllib.request.urlretrieve(ARCHIVE_URL, tmp, reporthook=reporthook)
     print()
-    size_mb = dest.stat().st_size / (1024 * 1024)
-    print(f"Saved to {dest} ({size_mb:.2f} MB)")
+    tmp.rename(dest)
+    print(f"Saved {dest} ({dest.stat().st_size / 1e6:.0f} MB)")
+
+
+def extract(archive: Path, wanted: list, output_dir: Path) -> None:
+    """
+    Extract the requested CSVs from the archive, flattening them into output_dir.
+
+    The zip nests files under a versioned directory (e.g. "KuaiRec 2.0/data/").
+    Flattening keeps the loader's config paths independent of that layout.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    remaining = set(wanted)
+
+    with zipfile.ZipFile(archive) as zf:
+        members = {Path(n).name: n for n in zf.namelist() if not n.endswith("/")}
+        for name in wanted:
+            dest = output_dir / name
+            if dest.exists():
+                print(f"  {name} — already extracted")
+                remaining.discard(name)
+                continue
+            member = members.get(name)
+            if member is None:
+                continue
+            with zf.open(member) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+            print(f"  {name} — {dest.stat().st_size / 1e6:.1f} MB")
+            remaining.discard(name)
+
+    if remaining:
+        raise SystemExit(
+            f"Not found in archive: {sorted(remaining)}\n"
+            f"Archive contents may have changed — inspect {archive} and update "
+            f"SUBSET_FILES."
+        )
 
 
 def main() -> None:
-    """
-    CLI entry point.
-
-    Parses --subset (small | big), resolves the output directory relative to
-    the project root, and calls download_file() for each file in the subset.
-    The 'small' subset (small_matrix.csv + supporting files) is sufficient
-    for all Tier 1 development; 'big' downloads the full 12.5M interaction
-    matrix for Tier 2 scale-up.
-    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--subset", choices=["small", "big"], default="small")
+    parser.add_argument("--keep-archive", action="store_true",
+                        help="keep KuaiRec.zip after extraction (default: delete)")
     args = parser.parse_args()
 
-    project_root = Path(__file__).parent.parent
-    output_dir = project_root / "data" / "raw" / "kuairec"
+    output_dir = PROJECT_ROOT / "datastore" / "raw" / "kuairec"
     output_dir.mkdir(parents=True, exist_ok=True)
+    archive = output_dir / "KuaiRec.zip"
 
-    for filename in SUBSET_FILES[args.subset]:
-        dest = output_dir / filename
-        if dest.exists():
-            print(f"Skipping {filename} — already exists")
-            continue
-        url = BASE_URL + filename
-        download_file(url, dest)
+    wanted = SUBSET_FILES[args.subset]
+    if all((output_dir / f).exists() for f in wanted):
+        print(f"All '{args.subset}' files already present in {output_dir}")
+        return
+
+    download_archive(archive)
+    print(f"Extracting '{args.subset}' subset to {output_dir}")
+    extract(archive, wanted, output_dir)
+
+    if not args.keep_archive:
+        archive.unlink()
+        print("Removed KuaiRec.zip (pass --keep-archive to retain it)")
+
+    print("Done.")
 
 
 if __name__ == "__main__":

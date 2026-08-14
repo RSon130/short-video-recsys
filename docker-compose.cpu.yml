@@ -13,9 +13,24 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cpu
+      target: runtime
     image: short-video-recsys:cpu
     ports:
       - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+
+  # Same code, plus test/lint tooling. Use for pytest and for pipeline steps:
+  #   docker compose -f docker-compose.cpu.yml run --rm dev pytest -q
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+      target: dev
+    image: short-video-recsys:dev
     volumes:
       - .:/app
     environment:

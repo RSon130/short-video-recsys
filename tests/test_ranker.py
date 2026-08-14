@@ -9,7 +9,7 @@ def cfg():
     return {
         "two_tower": {"embedding_dim": 64},
         "features": {"user_dense_dim": 16, "item_dense_dim": 16},
-        "ranking": {"ffn_dim": 256, "d_model": 128, "dropout": 0.0},
+        "ranking": {"hidden_dims": [256, 128], "dropout": 0.0},
     }
 
 

@@ -81,6 +81,6 @@ def build_ranker(cfg, user_dense_dim: int = None, item_dense_dim: int = None) ->
     if item_dense_dim is None:
         item_dense_dim = cfg["features"]["item_dense_dim"]
     input_dim = 2 * emb_dim + user_dense_dim + item_dense_dim
-    hidden_dims = [cfg["ranking"]["ffn_dim"], cfg["ranking"]["d_model"]]
+    hidden_dims = cfg["ranking"]["hidden_dims"]
     dropout = cfg["ranking"]["dropout"]
     return MLPRanker(input_dim, hidden_dims, dropout)
