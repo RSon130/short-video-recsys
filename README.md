@@ -28,8 +28,48 @@ and it invalidates several standard recipes.
 
 ## Results
 
-All 1,411 test users. Relevance is `watch_ratio >= 0.7`; every system excludes
-items the user already consumed in training.
+The system was evaluated on both KuaiRec subsets, which sit in very different
+regimes. The contrast is the most interesting result here: **which stage carries
+the system depends on catalogue size and density.**
+
+| | `small_matrix` | `big_matrix` |
+|---|---|---|
+| Interactions | 4.68M | **12.53M** |
+| Users × items | 1,411 × 3,327 | 7,176 × 9,958 |
+| Density | 99.6% | 17.5% |
+| Eligible items per user | ~676 | ~8,771 |
+| Relevance base rate | 25% | 1.1% |
+
+### `big_matrix` — 12.5M interactions, 6,873 test users
+
+| system | recall@5 | recall@10 | ndcg@10 | recall@20 | watch-AUC |
+|---|---|---|---|---|---|
+| popularity baseline | 0.0052 | 0.0055 | 0.0052 | 0.0061 | — |
+| **retrieval only** | **0.0191** | **0.0131** | **0.0130** | 0.0134 | 0.482 |
+| full pipeline | 0.0031 | 0.0070 | 0.0055 | 0.0093 | 0.714 |
+
+Retrieval beats popularity by **+266% recall@5** and **+136% recall@10**. This is
+the two-tower doing the job it exists for: at a 1.1% base rate a non-personalised
+list stops working, and narrowing 8,771 candidates to 200 has real value.
+
+**The MLP ranker degrades top-K recall at this scale** — the full pipeline scores
+below retrieval alone at every cutoff below 20. It is not a sampling artifact;
+the pattern is identical on a 300-user sample and on all 6,873.
+
+The cause is objective misalignment. The ranker is trained with **MSE on
+`watch_ratio`**, which optimises calibrated engagement prediction — and it does
+that well, lifting watch-time AUC from 0.482 to 0.714. But recall@K rewards
+placing `watch_ratio >= 0.7` items in the top few slots, and a regression head
+minimising squared error is pulled toward the conditional mean. Retrieval was
+trained with a *ranking* loss (BPR); the ranker was not. Put plainly: the ranker
+is better at predicting how much someone will watch and worse at choosing what
+to show them. Replacing MSE with a pairwise ranking loss over the same
+positive/negative definition retrieval uses is the open work item.
+
+### `small_matrix` — 4.68M interactions, all 1,411 test users
+
+Relevance is `watch_ratio >= 0.7`; every system excludes items the user already
+consumed in training.
 
 | system | recall@10 | ndcg@10 | recall@20 | ndcg@20 | watch-time AUC |
 |---|---|---|---|---|---|
@@ -46,7 +86,7 @@ items the user already consumed in training.
 | ndcg@20 | 0.2987 | 0.4406 | **+47.5%** |
 | watch-time AUC | 0.542 | 0.826 | **+52.4%** |
 
-**The pipeline does not beat the popularity baseline on this dataset** (−4.1%
+**On this subset the pipeline does not beat the popularity baseline** (−4.1%
 recall@10, −0.9% recall@20). That is a real finding, not a tuning failure:
 
 - After excluding seen items, each user has only ~676 eligible items, ~173 of
@@ -178,8 +218,9 @@ PyTorch · FAISS · FastAPI · Docker · pandas/NumPy · pytest (157 tests)
 
 ## Next
 
-- Scale to KuaiRec `big_matrix` (12.5M interactions, 7,176 × 10,728). A larger,
-  sparser catalogue is where two-stage retrieval is supposed to pay off and
-  where a popularity baseline should weaken.
+- **Replace the ranker's MSE objective with a pairwise ranking loss.** The
+  measurements above make the case: MSE optimises engagement calibration
+  (AUC 0.482 → 0.714) while costing top-K recall at scale. The ranker should be
+  trained on the same positive/negative pairs retrieval uses.
 - Deploy to GCP Cloud Run and measure p50/p95 under load.
 - Multi-task ranking (watch + like), then a Transformer ranker.
