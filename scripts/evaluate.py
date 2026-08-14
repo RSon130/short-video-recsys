@@ -90,6 +90,15 @@ def score_systems(cfg, users, ground_truth, top_k_final):
     ranking = popularity_ranking(train_df, positive_threshold)
     seen = train_df.groupby(Cols.USER_ID)[Cols.ITEM_ID].apply(set).to_dict()
 
+    # Every system must exclude items the user already consumed in training,
+    # or the comparison is meaningless. On this dataset the effect is not
+    # marginal: users have seen 2,651 of 3,327 items on average, and the
+    # temporal split makes train and test pairs disjoint, so a system that
+    # re-recommends seen items cannot score above zero by construction.
+    # Filtering only the baseline (as this script first did) handed popularity
+    # the entire advantage.
+    n_items = len(item_embs)
+
     recommendations = {
         "popularity": popularity_recommendations(ranking, users, top_k_final, seen),
         "retrieval-only": [],
@@ -100,7 +109,15 @@ def score_systems(cfg, users, ground_truth, top_k_final):
     print(f"Scoring {len(users):,} users ...")
     for uid in users:
         u_emb = user_embs[uid]
-        ret_scores, candidates = query_index(index, u_emb, top_k=top_k_recall)
+        # Over-fetch, then drop seen items and keep the top_k_recall survivors.
+        # Exact search over the whole catalogue is ~1 ms at this item count; a
+        # production system would over-fetch by a fixed factor instead.
+        all_scores, all_candidates = query_index(index, u_emb, top_k=n_items)
+        excluded = seen.get(uid, set())
+        kept = [(i, s) for i, s in zip(all_candidates, all_scores)
+                if int(i) not in excluded][:top_k_recall]
+        candidates = np.array([i for i, _ in kept], dtype=np.int64)
+        ret_scores = np.array([s for _, s in kept], dtype=np.float32)
 
         x = torch.from_numpy(features.build_batch(u_emb, item_embs, uid, candidates))
         with torch.no_grad():
@@ -160,9 +177,13 @@ def main():
     parser.add_argument("--k", nargs="+", type=int, default=None)
     parser.add_argument("--limit-users", type=int, default=None,
                         help="evaluate on a sample of users (for a fast check)")
+    parser.add_argument("--top-k-recall", type=int, default=None,
+                        help="override how many candidates retrieval passes on")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.top_k_recall:
+        cfg["retrieval"]["top_k_recall"] = args.top_k_recall
     k_values = args.k or cfg["evaluation"]["k_values"]
     positive_threshold = cfg["features"]["positive_watch_ratio"]
 

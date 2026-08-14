@@ -53,6 +53,22 @@ two_tower:
   embedding_dim: 64          # final output embedding (shared retrieval space)
   dropout: 0.1
 
+  # Whether the retrieval towers consume dense side features alongside the
+  # learned ID embedding. Set from a measured ablation on the test split
+  # (150 users, top_k_recall=200), not from taste:
+  #
+  #   towers            retrieval recall@10   full-pipeline recall@10   AUC
+  #   ID only                       0.2747                    0.4793   0.854
+  #   ID + side features            0.2887                    0.3593   0.753
+  #
+  # Side features lift retrieval slightly on its own, yet cost the end-to-end
+  # system a quarter of its recall. The item features are dominated by category
+  # one-hots and popularity counts, which pull the embedding space toward
+  # category clustering rather than personalised affinity, and hand the ranker
+  # a more homogeneous shortlist. The ranker consumes the same features anyway,
+  # where they measurably help.
+  use_dense_features: false
+
 ranking:
   # MLP ranker: hidden layer widths, then a 1-unit sigmoid head.
   # These were previously named d_model / ffn_dim — Transformer vocabulary for

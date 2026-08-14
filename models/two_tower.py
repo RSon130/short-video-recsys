@@ -134,7 +134,8 @@ class TwoTowerModel(nn.Module):
         return user_emb, item_emb
 
 
-def build_model(cfg, n_users, n_items) -> TwoTowerModel:
+def build_model(cfg, n_users, n_items,
+                user_dense_dim=None, item_dense_dim=None) -> TwoTowerModel:
     """
     Construct a TwoTowerModel from a config dict.
 
@@ -142,17 +143,23 @@ def build_model(cfg, n_users, n_items) -> TwoTowerModel:
     This is the single entry point used by both the training script and tests.
 
     Args:
-        cfg:     Merged config dict (base.yaml + dataset override).
-        n_users: Total unique users — sets the ID embedding vocabulary size.
-        n_items: Total unique items — sets the ID embedding vocabulary size.
+        cfg:            Merged config dict (base.yaml + dataset override).
+        n_users:        Total unique users — ID embedding vocabulary size.
+        n_items:        Total unique items — ID embedding vocabulary size.
+        user_dense_dim: Actual user side-feature width. Falls back to the config
+                        placeholder when None; pass the real value, which is
+                        only known once the processed features are loaded.
+        item_dense_dim: Same, for items.
 
     Returns:
         An untrained TwoTowerModel.
     """
     user_emb_dim = cfg["features"]["user_emb_dim"]
     item_emb_dim = cfg["features"]["item_emb_dim"]
-    user_dense_dim = cfg["features"]["user_dense_dim"]
-    item_dense_dim = cfg["features"]["item_dense_dim"]
+    if user_dense_dim is None:
+        user_dense_dim = cfg["features"]["user_dense_dim"]
+    if item_dense_dim is None:
+        item_dense_dim = cfg["features"]["item_dense_dim"]
     tower_hidden = cfg["two_tower"]["tower_hidden"]
     embedding_dim = cfg["two_tower"]["embedding_dim"]
     dropout = cfg["two_tower"]["dropout"]

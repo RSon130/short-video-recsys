@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from config_loader import load_config
+from features.dense_features import DenseFeatureStore
 from models.two_tower import build_model
 from data.schema import Cols
 
@@ -110,6 +111,35 @@ class InteractionDataset(Dataset):
         }
 
 
+class TowerFeatures:
+    """
+    Supplies side features to the retrieval towers, or nothing at all.
+
+    When disabled the towers are ID-only: dense width is reported as 0, so
+    build_model constructs an input layer that expects only the ID embedding
+    and the batches produced here are (batch, 0) tensors that concatenate
+    cleanly. That is deliberately different from feeding zero vectors through
+    dense weights the model can never use — the earlier behaviour, which made
+    the towers ID-only in effect while the architecture and the design doc both
+    claimed otherwise.
+    """
+    def __init__(self, store, enabled: bool):
+        self.store = store
+        self.enabled = enabled
+        self.user_dense_dim = store.user_dense_dim if enabled else 0
+        self.item_dense_dim = store.item_dense_dim if enabled else 0
+
+    def user_batch(self, uids):
+        if not self.enabled:
+            return torch.zeros(len(uids), 0)
+        return self.store.user_batch(uids)
+
+    def item_batch(self, iids):
+        if not self.enabled:
+            return torch.zeros(len(iids), 0)
+        return self.store.item_batch(iids)
+
+
 def bpr_loss(user_emb, pos_item_emb, neg_item_emb):
     """
     Bayesian Personalised Ranking loss.
@@ -151,7 +181,7 @@ def get_device(cfg):
     return torch.device(device_cfg)
 
 
-def run_epoch(model, loader, cfg, num_neg, device, optimizer=None):
+def run_epoch(model, loader, features, num_neg, device, optimizer=None):
     """
     Run one pass over `loader`, training if an optimizer is given.
 
@@ -165,27 +195,27 @@ def run_epoch(model, loader, cfg, num_neg, device, optimizer=None):
     training = optimizer is not None
     model.train() if training else model.eval()
 
-    user_dense_dim = cfg["features"]["user_dense_dim"]
-    item_dense_dim = cfg["features"]["item_dense_dim"]
     total_loss = 0.0
 
     with torch.set_grad_enabled(training):
         for batch in loader:
             batch_size = batch["user_id"].shape[0]
 
-            user_dense = torch.zeros(batch_size, user_dense_dim)
-            item_dense_pos = torch.zeros(batch_size, item_dense_dim)
+            user_ids = batch["user_id"]
+            pos_items = batch["pos_item"]
+            neg_items_flat = batch["neg_items"].view(-1)
 
             user_emb, pos_emb = model(
-                batch["user_id"].to(device),
-                user_dense.to(device),
-                batch["pos_item"].to(device),
-                item_dense_pos.to(device),
+                user_ids.to(device),
+                features.user_batch(user_ids).to(device),
+                pos_items.to(device),
+                features.item_batch(pos_items).to(device),
             )
 
-            neg_items_flat = batch["neg_items"].view(-1)
-            item_dense_neg = torch.zeros(neg_items_flat.shape[0], item_dense_dim)
-            neg_emb_flat = model.item_tower(neg_items_flat.to(device), item_dense_neg.to(device))
+            neg_emb_flat = model.item_tower(
+                neg_items_flat.to(device),
+                features.item_batch(neg_items_flat).to(device),
+            )
             neg_emb = neg_emb_flat.view(batch_size, num_neg, -1)
 
             loss = bpr_loss(user_emb, pos_emb, neg_emb)
@@ -243,8 +273,23 @@ def train(cfg):
     )
     loader = DataLoader(dataset, batch_size=cfg["training"]["retrieval"]["batch_size"], shuffle=True, num_workers=0)
 
+    # Whether the towers see side features is a measured choice — see the
+    # ablation table in config/base.yaml. When disabled the towers are genuinely
+    # ID-only (dense width 0) rather than fed zero vectors through unused
+    # weights, so the architecture matches what is actually being trained.
+    features = TowerFeatures(
+        DenseFeatureStore.load(),
+        enabled=cfg["two_tower"]["use_dense_features"],
+    )
+    print(f"Tower side features: "
+          f"{'enabled' if features.enabled else 'disabled (ID-only towers)'}")
+
     device = get_device(cfg)
-    model = build_model(cfg, n_users, n_items).to(device)
+    model = build_model(
+        cfg, n_users, n_items,
+        user_dense_dim=features.user_dense_dim,
+        item_dense_dim=features.item_dense_dim,
+    ).to(device)
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -254,8 +299,6 @@ def train(cfg):
 
     epochs = cfg["training"]["retrieval"]["epochs"]
     patience = cfg["training"]["retrieval"]["early_stopping_patience"]
-    user_dense_dim = cfg["features"]["user_dense_dim"]
-    item_dense_dim = cfg["features"]["item_dense_dim"]
 
     # Validation exists to answer "how many epochs?" with evidence instead of a
     # guess. The first full run showed why it matters: training loss bottomed at
@@ -284,8 +327,8 @@ def train(cfg):
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
-        train_loss = run_epoch(model, loader, cfg, num_neg, device, optimizer)
-        val_loss = run_epoch(model, val_loader, cfg, num_neg, device)
+        train_loss = run_epoch(model, loader, features, num_neg, device, optimizer)
+        val_loss = run_epoch(model, val_loader, features, num_neg, device)
         elapsed = time.time() - t0
 
         marker = ""
@@ -313,22 +356,27 @@ def train(cfg):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), ckpt_dir / f"two_tower_best_epoch_{best_epoch}.pt")
 
-    # Export item embeddings
+    # Export with the same features the towers were trained on. Exporting with
+    # zeros here while training on real features would be train/serve skew in
+    # the retrieval stage.
     model.eval()
     with torch.no_grad():
-        all_item_ids = torch.arange(n_items).to(device)
-        item_dense_all = torch.zeros(n_items, item_dense_dim).to(device)
-        item_embs = model.item_tower(all_item_ids, item_dense_all).cpu().numpy()
+        all_item_ids = torch.arange(n_items)
+        item_embs = model.item_tower(
+            all_item_ids.to(device),
+            features.item_batch(all_item_ids).to(device),
+        ).cpu().numpy()
 
     item_emb_path = "datastore/processed/item_embeddings.npy"
     np.save(item_emb_path, item_embs)
     print(f"Saved item embeddings: {item_emb_path}")
 
-    # Export user embeddings
     with torch.no_grad():
-        all_user_ids = torch.arange(n_users).to(device)
-        user_dense_all = torch.zeros(n_users, user_dense_dim).to(device)
-        user_embs = model.user_tower(all_user_ids, user_dense_all).cpu().numpy()
+        all_user_ids = torch.arange(n_users)
+        user_embs = model.user_tower(
+            all_user_ids.to(device),
+            features.user_batch(all_user_ids).to(device),
+        ).cpu().numpy()
 
     user_emb_path = "datastore/processed/user_embeddings.npy"
     np.save(user_emb_path, user_embs)

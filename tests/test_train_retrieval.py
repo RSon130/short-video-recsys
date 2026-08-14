@@ -144,3 +144,34 @@ def test_get_device_auto_returns_valid_device():
 def test_get_device_cuda_skipped_on_cpu():
     cfg = {"training": {"retrieval": {"device": "cuda"}}}
     assert get_device(cfg) == torch.device("cuda")
+
+
+def test_tower_features_disabled_yields_zero_width():
+    """
+    Disabled means ID-only towers, not zero vectors through unused dense
+    weights. The latter was the original behaviour and made the architecture
+    and the design doc disagree with what was actually trained.
+    """
+    from unittest.mock import MagicMock
+    from training.train_retrieval import TowerFeatures
+
+    store = MagicMock(user_dense_dim=30, item_dense_dim=83)
+    features = TowerFeatures(store, enabled=False)
+
+    assert features.user_dense_dim == 0
+    assert features.item_dense_dim == 0
+    assert features.user_batch(torch.tensor([0, 1])).shape == torch.Size([2, 0])
+    assert features.item_batch(torch.tensor([0, 1, 2])).shape == torch.Size([3, 0])
+
+
+def test_tower_features_enabled_delegates_to_store():
+    from unittest.mock import MagicMock
+    from training.train_retrieval import TowerFeatures
+
+    store = MagicMock(user_dense_dim=30, item_dense_dim=83)
+    store.user_batch.return_value = torch.zeros(2, 30)
+    features = TowerFeatures(store, enabled=True)
+
+    assert features.user_dense_dim == 30
+    assert features.user_batch(torch.tensor([0, 1])).shape == torch.Size([2, 30])
+    store.user_batch.assert_called_once()

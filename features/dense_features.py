@@ -120,6 +120,20 @@ class DenseFeatureStore:
         user_embs = np.broadcast_to(user_emb, (len(iids), len(user_emb)))
         return self.build_matrix(user_embs, item_embs[iids], uids, iids)
 
+    def user_batch(self, uids) -> "torch.Tensor":
+        """Dense user features for a batch of ids, as a torch tensor."""
+        import torch
+        return torch.from_numpy(
+            self._lookup(self._user_mat, np.asarray(uids), self.user_dense_dim)
+        )
+
+    def item_batch(self, iids) -> "torch.Tensor":
+        """Dense item features for a batch of ids, as a torch tensor."""
+        import torch
+        return torch.from_numpy(
+            self._lookup(self._item_mat, np.asarray(iids), self.item_dense_dim)
+        )
+
     def build_matrix(
         self,
         user_embs: np.ndarray,
