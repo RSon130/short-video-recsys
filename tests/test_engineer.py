@@ -2,7 +2,8 @@ import pickle
 import pandas as pd
 import pytest
 from unittest.mock import MagicMock, patch
-from features.engineer import load_config, save_parquet
+from config_loader import load_config
+from features.engineer import save_parquet
 
 
 def test_load_config_returns_dict_with_base_keys():

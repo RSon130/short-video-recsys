@@ -22,6 +22,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
+      # Project root on the path so any entry point works, whether invoked as
+      # `python features/engineer.py` or `python -m features.engineer`.
+      - PYTHONPATH=/app
 
   # Same code, plus test/lint tooling. Use for pytest and for pipeline steps:
   #   docker compose -f docker-compose.cpu.yml run --rm dev pytest -q
@@ -36,3 +39,6 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
+      # Project root on the path so any entry point works, whether invoked as
+      # `python features/engineer.py` or `python -m features.engineer`.
+      - PYTHONPATH=/app

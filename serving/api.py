@@ -12,9 +12,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import yaml
+
 from fastapi import FastAPI, HTTPException
 
+from config_loader import load_config
 from data.schema import RecommendRequest, RecommendResponse, ItemScore
 from features.dense_features import DenseFeatureStore
 from models.two_tower import build_model
@@ -34,21 +35,6 @@ _cache: dict = {}   # user_id -> (RecommendResponse, expiry_float)
 logger = logging.getLogger("recsys.api")
 
 app = FastAPI(title="Short-Video RecSys", version="1.0.0")
-
-
-def _load_config() -> dict:
-    """
-    Load and merge base.yaml + kuairec.yaml into a single config dict.
-
-    Separated from _load_artifacts so config can be accessed before
-    ML artifacts are loaded (e.g. for logging setup).
-    """
-    with open("config/base.yaml") as f:
-        base = yaml.safe_load(f)
-    with open("config/kuairec.yaml") as f:
-        override = yaml.safe_load(f)
-    base.update(override)
-    return base
 
 
 def _load_artifacts(cfg: dict) -> None:
@@ -93,7 +79,7 @@ def _load_artifacts(cfg: dict) -> None:
 @app.on_event("startup")
 async def startup():
     global _cfg
-    _cfg = _load_config()
+    _cfg = load_config()
 
     log_dir = Path(_cfg["monitoring"]["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)

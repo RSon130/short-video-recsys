@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from data.schema import Cols
 from evaluation.metrics import evaluate_at_k_values, watch_time_auc
 from evaluation.ab_test import run_ab_test
-from features.engineer import load_config
+from config_loader import load_config
 from features.dense_features import DenseFeatureStore
 from models.ranker import build_ranker
 from retrieval.faiss_index import load_index, query_index

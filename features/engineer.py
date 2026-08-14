@@ -12,34 +12,9 @@ import pickle
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
+from config_loader import load_config
 from data import get_loader
-
-
-def load_config(config_path: str) -> dict:
-    """
-    Load and merge configuration from base.yaml and a dataset-specific override.
-
-    Strategy: load base.yaml first (all defaults), then update it with the
-    dataset-specific config (e.g. kuairec.yaml).  Top-level keys in the
-    override replace their counterparts in base; keys absent from the override
-    remain at their base values.
-
-    Args:
-        config_path: Path to the override config file, relative to project root
-                     (e.g. "config/kuairec.yaml").
-
-    Returns:
-        Merged config dict.
-    """
-    project_root = Path(__file__).parent.parent
-    with open(project_root / "config" / "base.yaml") as f:
-        base = yaml.safe_load(f)
-    with open(project_root / config_path) as f:
-        override = yaml.safe_load(f)
-    base.update(override)
-    return base
 
 
 def save_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -94,13 +69,17 @@ def run(cfg: dict) -> None:
         cfg["data"]["val_ratio"],
     )
 
-    interactions_dir = project_root / "data" / "processed" / "interactions"
+    # Read the destination from config rather than hardcoding it. cfg defined
+    # processed_dir all along and nothing consumed it, so the path here was
+    # assembled from literal parts — which meant it silently kept writing into
+    # the data/ *package* directory after storage moved to datastore/.
+    processed_dir = project_root / cfg["data"]["processed_dir"]
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    interactions_dir = processed_dir / "interactions"
     save_parquet(split.train, interactions_dir / "train.parquet")
     save_parquet(split.val, interactions_dir / "val.parquet")
     save_parquet(split.test, interactions_dir / "test.parquet")
-
-    processed_dir = project_root / "data" / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
 
     save_parquet(fs.user_features, processed_dir / "user_features.parquet")
     save_parquet(fs.item_features, processed_dir / "item_features.parquet")

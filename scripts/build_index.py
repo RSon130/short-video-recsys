@@ -13,7 +13,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from features.engineer import load_config
+from config_loader import load_config
 from retrieval import faiss_index
 
 

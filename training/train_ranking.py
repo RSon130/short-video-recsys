@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-from features.engineer import load_config
+from config_loader import load_config
 from features.dense_features import DenseFeatureStore
 from models.ranker import build_ranker
 from data.schema import Cols

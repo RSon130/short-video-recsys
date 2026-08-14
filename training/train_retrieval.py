@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from features.engineer import load_config
+from config_loader import load_config
 from models.two_tower import build_model
 from data.schema import Cols
 
