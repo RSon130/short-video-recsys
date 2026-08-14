@@ -25,46 +25,88 @@ class InteractionDataset(Dataset):
     """
     PyTorch Dataset for BPR (Bayesian Personalised Ranking) training.
 
-    Each sample contains one positive (user, item) pair from the observed
-    interaction log, plus `num_neg` randomly sampled negative items that the
-    user has NOT interacted with.  BPR loss then pushes the user embedding
-    closer to the positive item and away from the negatives.
+    Labelling strategy — why this dataset does not sample random negatives
+    ------------------------------------------------------------------------
+    The obvious implicit-feedback recipe is "observed item = positive, random
+    unobserved item = negative". That recipe assumes a *sparse* interaction
+    matrix, where an unobserved pair is a reasonable guess at disinterest.
 
-    Negative sampling strategy: uniform random — fast and works well in
-    practice.  Known limitation: popular items are over-represented as
-    negatives, which can cause popularity bias.  Tier 2 improvement: use
-    in-batch negatives or popularity-corrected sampling.
+    KuaiRec is the opposite: it is fully observed, measured here at **99.6%
+    density**. Practically every (user, item) pair carries a real watch_ratio,
+    so "an item the user has not interacted with" is an almost empty set. The
+    previous implementation drew negatives uniformly from the whole item
+    vocabulary, which meant negatives were observed interactions with the same
+    watch_ratio distribution as the positives (mean 0.702 either way).
+    Positives and negatives were statistically identical, there was no ranking
+    signal to learn, and training flatlined at loss ~0.597 against a
+    random-init baseline of log(2) ~ 0.693.
+
+    Since the matrix is fully observed, engagement is *known* rather than
+    inferred:
+
+        positive : watch_ratio >= pos_threshold   (the user watched it through)
+        negative : watch_ratio <= neg_threshold   (the user bailed out early)
+
+    Pairs in between are dropped from training rather than forced into a class
+    they don't clearly belong to. Negatives are drawn from the *same user's*
+    low-engagement items, so the loss contrasts two things that user actually
+    saw — which is the comparison BPR is meant to model.
+
+    Performance note: users, items, and per-user negative pools are converted
+    to numpy up front. The previous version called df.iloc[idx] per sample;
+    that single pandas lookup dominated the epoch, and removing it is most of
+    the speedup.
 
     Args:
-        df:      Interaction DataFrame with columns user_id and item_id.
-        n_items: Total item vocabulary size — upper bound for negative sampling.
-        num_neg: Number of negative samples per positive interaction.
-        seed:    RNG seed for reproducibility.
+        df:             Interaction DataFrame with user_id, item_id, watch_ratio.
+        num_neg:        Negatives per positive.
+        pos_threshold:  Minimum watch_ratio for a positive.
+        neg_threshold:  Maximum watch_ratio for a negative.
+        seed:           RNG seed for reproducibility.
     """
-    def __init__(self, df, n_items, num_neg, seed=42):
-        self.df = df
-        self.n_items = n_items
+    def __init__(self, df, num_neg, pos_threshold=0.7, neg_threshold=0.3, seed=42):
         self.num_neg = num_neg
         self.rng = np.random.default_rng(seed)
 
+        positives = df.loc[df[Cols.WATCH_RATIO] >= pos_threshold,
+                           [Cols.USER_ID, Cols.ITEM_ID]].to_numpy(dtype=np.int64)
+        if len(positives) == 0:
+            raise ValueError(
+                f"No interactions with watch_ratio >= {pos_threshold}; "
+                f"nothing to train on."
+            )
+        self.users = positives[:, 0]
+        self.pos_items = positives[:, 1]
+
+        negatives = df.loc[df[Cols.WATCH_RATIO] <= neg_threshold,
+                           [Cols.USER_ID, Cols.ITEM_ID]]
+        self.neg_pools = {
+            int(uid): group.to_numpy(dtype=np.int64)
+            for uid, group in negatives.groupby(Cols.USER_ID)[Cols.ITEM_ID]
+        }
+        # Users with no low-engagement item of their own fall back to the
+        # global pool of items that rate poorly across the population.
+        self.global_neg_pool = negatives[Cols.ITEM_ID].to_numpy(dtype=np.int64)
+        if len(self.global_neg_pool) == 0:
+            raise ValueError(
+                f"No interactions with watch_ratio <= {neg_threshold}; "
+                f"no negatives available."
+            )
+
     def __len__(self):
-        return len(self.df)
+        return len(self.users)
 
     def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        user_id = int(row[Cols.USER_ID])
-        pos_item = int(row[Cols.ITEM_ID])
+        user_id = self.users[idx]
+        pos_item = self.pos_items[idx]
 
-        neg_items = []
-        while len(neg_items) < self.num_neg:
-            candidate = int(self.rng.integers(0, self.n_items))
-            if candidate != pos_item:
-                neg_items.append(candidate)
+        pool = self.neg_pools.get(int(user_id), self.global_neg_pool)
+        neg_items = pool[self.rng.integers(0, len(pool), self.num_neg)]
 
         return {
-            "user_id": torch.tensor(user_id, dtype=torch.int64),
-            "pos_item": torch.tensor(pos_item, dtype=torch.int64),
-            "neg_items": torch.tensor(neg_items, dtype=torch.int64),
+            "user_id": torch.from_numpy(np.asarray(user_id, dtype=np.int64)),
+            "pos_item": torch.from_numpy(np.asarray(pos_item, dtype=np.int64)),
+            "neg_items": torch.from_numpy(neg_items),
         }
 
 
@@ -138,7 +180,18 @@ def train(cfg):
     n_users = id_maps["n_users"]
     num_neg = cfg["features"]["num_neg_samples"]
 
-    dataset = InteractionDataset(train_df, n_items, num_neg, seed=cfg["project"]["seed"])
+    dataset = InteractionDataset(
+        train_df,
+        num_neg,
+        pos_threshold=cfg["features"]["positive_watch_ratio"],
+        neg_threshold=cfg["features"]["negative_watch_ratio"],
+        seed=cfg["project"]["seed"],
+    )
+    print(
+        f"Training pairs: {len(dataset):,} positives "
+        f"(watch_ratio >= {cfg['features']['positive_watch_ratio']}) "
+        f"from {len(train_df):,} interactions"
+    )
     loader = DataLoader(dataset, batch_size=cfg["training"]["retrieval"]["batch_size"], shuffle=True, num_workers=0)
 
     device = get_device(cfg)
