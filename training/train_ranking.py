@@ -44,30 +44,40 @@ class RankingDataset(Dataset):
         user_features: DataFrame with column user_id plus numeric feature columns.
         item_features: DataFrame with column item_id plus numeric feature columns.
     """
-    def __init__(self, interactions, user_embs, item_embs, user_features, item_features):
-        self.records = interactions[[Cols.USER_ID, Cols.ITEM_ID, Cols.WATCH_RATIO]].values
+    def __init__(self, interactions, user_embs, item_embs, features):
+        self.uids = interactions[Cols.USER_ID].to_numpy(dtype=np.int64)
+        self.iids = interactions[Cols.ITEM_ID].to_numpy(dtype=np.int64)
+        self.labels = interactions[Cols.WATCH_RATIO].to_numpy(dtype=np.float32)
         self.user_embs = user_embs
         self.item_embs = item_embs
 
         # Shared with evaluation and serving — see features/dense_features.py for
         # why the input layout lives in one place.
-        self.features = DenseFeatureStore(user_features, item_features)
-        self.user_dense_dim = self.features.user_dense_dim
-        self.item_dense_dim = self.features.item_dense_dim
+        self.features = features
+        self.user_dense_dim = features.user_dense_dim
+        self.item_dense_dim = features.item_dense_dim
 
     def __len__(self):
-        return len(self.records)
+        return len(self.labels)
 
     def __getitem__(self, idx):
-        uid, iid, label = self.records[idx]
-        uid, iid = int(uid), int(iid)
+        # Returns the raw index only; the feature vector is assembled per batch
+        # by collate(). Building one 241-dim row at a time in Python dominated
+        # the epoch, and there are millions of rows per epoch.
+        return idx
 
-        x = self.features.build_input(
-            self.user_embs[uid], self.item_embs[iid], uid, iid
+    def collate(self, indices):
+        """Assemble one batch of ranker inputs with vectorised lookups."""
+        indices = np.asarray(indices, dtype=np.int64)
+        uids = self.uids[indices]
+        iids = self.iids[indices]
+
+        x = self.features.build_matrix(
+            self.user_embs[uids], self.item_embs[iids], uids, iids
         )
         return {
             "x": torch.from_numpy(x),
-            "label": torch.tensor(label, dtype=torch.float32),
+            "label": torch.from_numpy(self.labels[indices]),
         }
 
 
@@ -104,13 +114,20 @@ def train(cfg):
         cfg: Merged config dict.
     """
     train_df = pd.read_parquet("datastore/processed/interactions/train.parquet")
+    val_df = pd.read_parquet("datastore/processed/interactions/val.parquet")
     user_embs = np.load("datastore/processed/user_embeddings.npy")
     item_embs = np.load("datastore/processed/item_embeddings.npy")
-    user_features = pd.read_parquet("datastore/processed/user_features.parquet")
-    item_features = pd.read_parquet("datastore/processed/item_features.parquet")
+    features = DenseFeatureStore.load()
 
-    dataset = RankingDataset(train_df, user_embs, item_embs, user_features, item_features)
-    loader = DataLoader(dataset, batch_size=cfg["training"]["ranking"]["batch_size"], shuffle=True, num_workers=0)
+    batch_size = cfg["training"]["ranking"]["batch_size"]
+    dataset = RankingDataset(train_df, user_embs, item_embs, features)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                        num_workers=0, collate_fn=dataset.collate)
+
+    val_dataset = RankingDataset(val_df, user_embs, item_embs, features)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=0, collate_fn=val_dataset.collate)
+    print(f"Ranker training rows: {len(dataset):,} | validation rows: {len(val_dataset):,}")
 
     device = get_device(cfg)
     model = build_ranker(cfg, dataset.user_dense_dim, dataset.item_dense_dim).to(device)
@@ -123,33 +140,59 @@ def train(cfg):
     criterion = nn.MSELoss()
 
     epochs = cfg["training"]["ranking"]["epochs"]
+    patience = cfg["training"]["ranking"]["early_stopping_patience"]
 
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0.0
+    def run_epoch(data_loader, train_mode):
+        """One pass over data_loader. Shared so the two paths cannot diverge."""
+        model.train() if train_mode else model.eval()
+        total = 0.0
+        with torch.set_grad_enabled(train_mode):
+            for batch in data_loader:
+                preds = model(batch["x"].to(device)).squeeze(1)
+                loss = criterion(preds, batch["label"].to(device))
+                if train_mode:
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                total += loss.item()
+        return total / len(data_loader)
+
+    best_val = float("inf")
+    best_state = None
+    best_epoch = 0
+    epochs_without_improvement = 0
+
+    for epoch in range(1, epochs + 1):
         t0 = time.time()
-
-        for batch in loader:
-            preds = model(batch["x"].to(device)).squeeze(1)
-            loss = criterion(preds, batch["label"].to(device))
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
+        train_mse = run_epoch(loader, True)
+        val_mse = run_epoch(val_loader, False)
         elapsed = time.time() - t0
-        avg_loss = total_loss / len(loader)
-        print(f"Epoch {epoch+1}/{epochs} — mse: {avg_loss:.6f} — {elapsed:.1f}s")
 
-    # Save final model
+        marker = ""
+        if val_mse < best_val:
+            best_val = val_mse
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_epoch = epoch
+            epochs_without_improvement = 0
+            marker = "  <- best"
+        else:
+            epochs_without_improvement += 1
+
+        print(f"Epoch {epoch}/{epochs} — train mse: {train_mse:.6f} — "
+              f"val mse: {val_mse:.6f} — {elapsed:.1f}s{marker}")
+
+        if epochs_without_improvement >= patience:
+            print(f"Early stopping: no validation improvement in {patience} epochs.")
+            break
+
+    model.load_state_dict(best_state)
+    print(f"Restored best ranker from epoch {best_epoch} (val mse {best_val:.6f})")
+
     torch.save(model.state_dict(), "datastore/processed/ranker_model.pt")
 
-    # Save checkpoint
     ckpt_dir = Path(cfg["training"]["ranking"]["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), ckpt_dir / f"ranker_epoch_{epochs}.pt")
+    torch.save(model.state_dict(), ckpt_dir / f"ranker_best_epoch_{best_epoch}.pt")
 
 
 if __name__ == "__main__":

@@ -75,7 +75,8 @@ training:
     device: auto            # auto | cpu | cuda
     checkpoint_dir: checkpoints/retrieval
   ranking:
-    epochs: 30
+    epochs: 30                      # upper bound; early stopping usually ends sooner
+    early_stopping_patience: 3
     batch_size: 512
     lr: 0.0005
     weight_decay: 0.00001
