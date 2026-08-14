@@ -1,133 +1,185 @@
 # Short-Video RecSys
 
-A production-grade recommendation system for short-video feeds, modelled on the YouTube Shorts / TikTok architecture. Built in three tiers — each independently shippable and resume-worthy.
-
-## Architecture
+A two-stage recommender for short-video feeds — two-tower retrieval with ANN
+search, followed by a neural ranker — built on KuaiRec, a fully-observed
+interaction dataset from the Kuaishou short-video platform. The architecture
+follows the retrieval-then-ranking pattern used by YouTube, TikTok, and
+Pinterest.
 
 ```
 Request
   └─ Stage 1 · Retrieval   Two-Tower (BPR) + FAISS IndexFlatIP → top-200 candidates
-  └─ Stage 2 · Ranking     MLP Ranker (MSE on watch_ratio)     → top-20 scored items
+  └─ Stage 2 · Ranking     MLP ranker (MSE on watch_ratio)     → top-K scored items
   └─ Serving               FastAPI + in-memory TTL cache
 ```
 
-| Component | Implementation | Notes |
-|-----------|---------------|-------|
-| Retrieval | Two-tower neural net (BPR loss) | L2-normalised embeddings, cosine ANN |
-| Index | FAISS `IndexFlatIP` | Exact IP search, <5 ms on 1K items |
-| Ranker | MLP (3 layers, sigmoid output) | Predicts watch_ratio ∈ [0, 1] |
-| Serving | FastAPI + uvicorn | TTL in-memory cache |
-| Dataset | KuaiRec `small_matrix` (1K×1K) | ~350K interactions after cold-start filter |
+## Dataset
+
+| | |
+|---|---|
+| Interactions | **4,676,570** |
+| Users × items | 1,411 × 3,327 |
+| Matrix density | **99.6%** (fully observed) |
+| Split | temporal 80/10/10 — 3.74M train, 468K val, 468K test |
+
+KuaiRec is *fully observed*: nearly every (user, item) pair carries a real
+`watch_ratio`. That single property drives most of the design decisions below,
+and it invalidates several standard recipes.
+
+## Results
+
+All 1,411 test users. Relevance is `watch_ratio >= 0.7`; every system excludes
+items the user already consumed in training.
+
+| system | recall@10 | ndcg@10 | recall@20 | ndcg@20 | watch-time AUC |
+|---|---|---|---|---|---|
+| popularity baseline | **0.4806** | **0.4900** | 0.4629 | 0.4744 | — |
+| retrieval only | 0.2824 | 0.3323 | 0.2599 | 0.2987 | 0.542 |
+| **full pipeline** | 0.4609 | 0.4310 | 0.4588 | 0.4406 | **0.826** |
+
+**What the ranking stage adds** — the case for two stages:
+
+| metric | retrieval only | full pipeline | lift |
+|---|---|---|---|
+| recall@10 | 0.2824 | 0.4609 | **+63.2%** |
+| recall@20 | 0.2599 | 0.4588 | **+76.5%** |
+| ndcg@20 | 0.2987 | 0.4406 | **+47.5%** |
+| watch-time AUC | 0.542 | 0.826 | **+52.4%** |
+
+**The pipeline does not beat the popularity baseline on this dataset** (−4.1%
+recall@10, −0.9% recall@20). That is a real finding, not a tuning failure:
+
+- After excluding seen items, each user has only ~676 eligible items, ~173 of
+  which are relevant — a **25% base rate**. On a small, dense catalogue where
+  popular items are broadly enjoyed, popularity is a genuinely strong baseline.
+- Retrieval's job is *narrowing*. At 3,327 items there is little to narrow, so
+  the stage that carries a production system contributes little here. The
+  measured retrieval AUC of 0.542 says as much.
+
+A 150-user sample initially showed the pipeline ahead by 0.7% at recall@20. On
+the full test set that reverses to −0.9%, so the apparent win was sampling
+noise. The full-set number is the one reported.
+
+## Design decisions
+
+**Negatives come from observed low engagement, not from unobserved pairs.**
+The standard implicit-feedback recipe — observed item positive, random
+unobserved item negative — assumes a sparse matrix, where an unobserved pair is
+a fair guess at disinterest. At 99.6% density there are almost no unobserved
+pairs, so a uniformly drawn "negative" is an observed interaction with the same
+`watch_ratio` distribution as the positives (mean 0.702 either way). Trained
+that way, BPR loss sat at 0.597 against a random-init baseline of log(2) ≈
+0.693 — the positives and negatives were statistically identical and there was
+no signal to learn. Positives are now `watch_ratio >= 0.7`, negatives are the
+*same user's* items at `<= 0.3`, and the ambiguous middle band is excluded.
+Loss dropped to 0.264.
+
+**Relevance is engagement, not exposure.** Ground truth uses the same
+`watch_ratio` threshold as training. Counting any test-split row as relevant
+would measure which items a user was *shown* on a matrix where nearly
+everything is shown.
+
+**Side features are excluded from the retrieval towers, by measurement.**
+
+| towers | retrieval recall@10 | full-pipeline recall@10 | AUC |
+|---|---|---|---|
+| ID only | 0.2747 | **0.4793** | **0.854** |
+| ID + side features | 0.2887 | 0.3593 | 0.753 |
+
+Side features lift retrieval slightly on its own yet cost the end-to-end system
+a quarter of its recall. The item features are dominated by category one-hots
+and popularity counts, which cluster the embedding space by category rather
+than by affinity, handing the ranker a more homogeneous shortlist. The ranker
+consumes those same features directly, where they measurably help.
+
+**Dense features are normalised before use.** Raw item features reach 2.6e11
+while tower embeddings are L2-normalised to ~0.1. Fed to the ranker unscaled,
+its sigmoid saturated and it emitted 1.0 for every input — validation MSE stuck
+at exactly `var + (1-mean)² = 0.1999`. Signed `log1p` then a z-score, applied at
+write time so training, evaluation, and serving read identical values.
+
+**Epoch counts come from validation, not from the config.** Both models track
+validation loss, restore the best checkpoint, and stop early. The first
+retrieval run made the point: training loss bottomed at epoch 4 and drifted
+upward for 16 more, exporting embeddings from a measurably worse model.
+
+**`IndexFlatIP`, not `IVFFlat`.** Exact search is ~1 ms at 3,327 items. An
+approximate index would add tuning burden for no gain; it earns its place past
+~100K items.
 
 ## Quickstart
 
-### Local (conda)
+Everything runs in Docker — CPU by default, which is also what Cloud Run uses.
 
 ```bash
-conda env create -f environment.yml
-conda activate recsys
-
-# 1. Download data
-python scripts/download_kuairec.py --subset small
-
-# 2. Feature engineering
-python features/engineer.py
-
-# 3. Train retrieval model (~5 min on CPU)
-python training/train_retrieval.py
-
-# 4. Build FAISS index
-python scripts/build_index.py
-
-# 5. Train ranker
-python training/train_ranking.py
-
-# 6. Evaluate
-python scripts/evaluate.py
-
-# 7. Start API
-uvicorn serving.api:app --host 0.0.0.0 --port 8000
+docker compose -f docker-compose.cpu.yml build
 ```
-
-### Docker
 
 ```bash
-docker-compose up --build
+docker compose -f docker-compose.cpu.yml run --rm dev python scripts/download_kuairec.py
 ```
-
-Then send a request:
 
 ```bash
-curl -X POST http://localhost:8000/recommend \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": 0, "top_k": 20}'
+docker compose -f docker-compose.cpu.yml run --rm dev python features/engineer.py
 ```
 
-## Evaluation Results (Tier 1 — small_matrix)
-
-| Metric | Value |
-|--------|-------|
-| Recall@5 | — |
-| Recall@10 | — |
-| Recall@20 | — |
-| NDCG@5 | — |
-| NDCG@10 | — |
-| NDCG@20 | — |
-| Watch-time AUC (retrieval) | — |
-| Watch-time AUC (ranker) | — |
-
-> Numbers filled in after training completes.
-
-## API
-
-**`POST /recommend`**
-
-```json
-{
-  "user_id": 42,
-  "top_k": 20
-}
+```bash
+docker compose -f docker-compose.cpu.yml run --rm dev python training/train_retrieval.py
 ```
 
-Returns:
-
-```json
-{
-  "user_id": 42,
-  "recommendations": [{"item_id": 101, "score": 0.87, "rank": 1}, ...],
-  "recall_size": 200,
-  "latency_ms": 18.4
-}
+```bash
+docker compose -f docker-compose.cpu.yml run --rm dev python scripts/build_index.py
 ```
 
-**`GET /health`** → `{"status": "ok"}`
-
-## Project Structure
-
-```
-config/          # base.yaml + kuairec.yaml
-data/            # loaders, schema, factory
-features/        # engineer.py — temporal split, parquet export
-models/          # two_tower.py, ranker.py
-training/        # train_retrieval.py, train_ranking.py
-retrieval/       # faiss_index.py
-serving/         # FastAPI api.py
-evaluation/      # metrics.py, ab_test.py
-scripts/         # download_kuairec.py, build_index.py, evaluate.py
-docs/            # system_design.md, learning_guide.md, progress.md
+```bash
+docker compose -f docker-compose.cpu.yml run --rm dev python training/train_ranking.py
 ```
 
-## Tier Roadmap
+```bash
+docker compose -f docker-compose.cpu.yml run --rm dev python scripts/evaluate.py
+```
 
-| Tier | What's added | Status |
-|------|-------------|--------|
-| 1 · Core ML | Two-tower + FAISS + MLP ranker + Docker | ✅ |
-| 2 · Production | IVFFlat index, Redis cache, multi-task ranking, Cloud Run | — |
-| 3 · ML Depth | InfoNCE loss, Transformer ranker, MMR diversity, Prefect | — |
+Serve the API:
 
-## Design Decisions
+```bash
+docker compose -f docker-compose.cpu.yml up api
+```
 
-- **BPR loss** (Tier 1) → InfoNCE with in-batch negatives (Tier 3): BPR is simple and robust; InfoNCE scales better with batch size.
-- **IndexFlatIP** (Tier 1) → IVFFlat (Tier 2): exact search is fine at 1K items; IVFFlat reduces latency by ~10× at 100K+ items.
-- **In-memory dict cache** (Tier 1) → Redis (Tier 2): single-instance dev cache; Redis enables multi-instance horizontal scaling.
-- **Temporal split**: sorted by timestamp globally — prevents any future leakage into training.
+```bash
+curl -X POST http://localhost:8000/recommend -H "Content-Type: application/json" -d '{"user_id": 0, "top_k": 20}'
+```
+
+Tests:
+
+```bash
+docker compose -f docker-compose.cpu.yml run --rm dev pytest -q
+```
+
+## Project structure
+
+```
+config/          base.yaml + kuairec.yaml
+config_loader.py deep-merge config loading, shared by every entry point
+data/            loaders, canonical schema, factory   (code only)
+datastore/       raw + processed data                 (gitignored)
+features/        engineer.py, dense_features.py
+models/          two_tower.py, ranker.py
+training/        train_retrieval.py, train_ranking.py
+retrieval/       faiss_index.py
+serving/         FastAPI api.py
+evaluation/      metrics.py, baselines.py, ab_test.py
+scripts/         download_kuairec.py, build_index.py, evaluate.py
+docs/            system_design.md, progress.md, learning_guide.md
+```
+
+## Stack
+
+PyTorch · FAISS · FastAPI · Docker · pandas/NumPy · pytest (157 tests)
+
+## Next
+
+- Scale to KuaiRec `big_matrix` (12.5M interactions, 7,176 × 10,728). A larger,
+  sparser catalogue is where two-stage retrieval is supposed to pay off and
+  where a popularity baseline should weaken.
+- Deploy to GCP Cloud Run and measure p50/p95 under load.
+- Multi-task ranking (watch + like), then a Transformer ranker.
