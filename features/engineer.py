@@ -11,10 +11,49 @@ import argparse
 import pickle
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from config_loader import load_config
 from data import get_loader
+from data.schema import Cols
+
+
+def normalize_dense_features(df: pd.DataFrame, id_col: str) -> pd.DataFrame:
+    """
+    Put dense side features on a comparable scale to the learned embeddings.
+
+    Why this exists: the raw KuaiRec side features span roughly twelve orders of
+    magnitude — item columns reach 2.6e11 (play/show counts), user columns reach
+    ~2e3 — while the tower embeddings are L2-normalised to about 0.1. Feeding
+    both into the ranker's first Linear layer saturated its sigmoid, and the
+    model collapsed to predicting 1.0 for every input. That failure is easy to
+    misread as "the ranker adds nothing": the loss simply sits at
+    var + (1 - mean)^2 and never moves.
+
+    Two steps:
+      1. signed log1p — compresses count-like columns whose distribution spans
+         many orders of magnitude, without breaking on zeros or negatives.
+      2. z-score — centres and scales each column to roughly unit variance.
+
+    Columns with zero variance carry no information; they are scaled to zero
+    rather than dividing by zero.
+
+    Note on leakage: these are static user/item attributes rather than
+    time-varying interaction data, so statistics are fitted over the whole
+    feature table. Anything derived from interactions would have to be fitted on
+    the training split alone.
+    """
+    ids = df[id_col]
+    values = df.drop(columns=[id_col]).astype("float64")
+
+    values = np.sign(values) * np.log1p(np.abs(values))
+
+    std = values.std()
+    normalized = (values - values.mean()) / std.replace(0.0, 1.0)
+    normalized[std[std == 0.0].index] = 0.0
+
+    return pd.concat([ids, normalized.astype("float32")], axis=1)
 
 
 def save_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -81,11 +120,15 @@ def run(cfg: dict) -> None:
     save_parquet(split.val, interactions_dir / "val.parquet")
     save_parquet(split.test, interactions_dir / "test.parquet")
 
-    save_parquet(fs.user_features, processed_dir / "user_features.parquet")
-    save_parquet(fs.item_features, processed_dir / "item_features.parquet")
+    # Normalised before persisting so every consumer — ranker training,
+    # evaluation, serving — reads the same scaled values.
+    user_features = normalize_dense_features(fs.user_features, Cols.USER_ID)
+    item_features = normalize_dense_features(fs.item_features, Cols.ITEM_ID)
+    save_parquet(user_features, processed_dir / "user_features.parquet")
+    save_parquet(item_features, processed_dir / "item_features.parquet")
 
-    user_dense_dim = fs.user_features.shape[1] - 1  # exclude user_id column
-    item_dense_dim = fs.item_features.shape[1] - 1  # exclude item_id column
+    user_dense_dim = user_features.shape[1] - 1  # exclude user_id column
+    item_dense_dim = item_features.shape[1] - 1  # exclude item_id column
 
     id_maps = {
         "user_id_map": fs.user_id_map,
@@ -101,8 +144,8 @@ def run(cfg: dict) -> None:
     print(f"train rows: {len(split.train)}")
     print(f"val rows:   {len(split.val)}")
     print(f"test rows:  {len(split.test)}")
-    print(f"user_features rows: {len(fs.user_features)}")
-    print(f"item_features rows: {len(fs.item_features)}")
+    print(f"user_features rows: {len(user_features)}")
+    print(f"item_features rows: {len(item_features)}")
 
 
 if __name__ == "__main__":
