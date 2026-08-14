@@ -39,7 +39,8 @@ def main() -> None:
     cfg = load_config(args.config)
 
     project_root = Path(__file__).parent.parent
-    embeddings = np.load(project_root / "data" / "processed" / "item_embeddings.npy")
+    processed_dir = project_root / cfg["data"]["processed_dir"]
+    embeddings = np.load(processed_dir / "item_embeddings.npy")
 
     index = faiss_index.build_index(embeddings)
 
