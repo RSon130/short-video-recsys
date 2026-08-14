@@ -151,6 +151,55 @@ def get_device(cfg):
     return torch.device(device_cfg)
 
 
+def run_epoch(model, loader, cfg, num_neg, device, optimizer=None):
+    """
+    Run one pass over `loader`, training if an optimizer is given.
+
+    Shared by the training and validation passes so the two cannot compute the
+    loss differently — the same class of drift that produced the train/serve
+    skew in the ranker.
+
+    Returns:
+        Mean BPR loss over the epoch.
+    """
+    training = optimizer is not None
+    model.train() if training else model.eval()
+
+    user_dense_dim = cfg["features"]["user_dense_dim"]
+    item_dense_dim = cfg["features"]["item_dense_dim"]
+    total_loss = 0.0
+
+    with torch.set_grad_enabled(training):
+        for batch in loader:
+            batch_size = batch["user_id"].shape[0]
+
+            user_dense = torch.zeros(batch_size, user_dense_dim)
+            item_dense_pos = torch.zeros(batch_size, item_dense_dim)
+
+            user_emb, pos_emb = model(
+                batch["user_id"].to(device),
+                user_dense.to(device),
+                batch["pos_item"].to(device),
+                item_dense_pos.to(device),
+            )
+
+            neg_items_flat = batch["neg_items"].view(-1)
+            item_dense_neg = torch.zeros(neg_items_flat.shape[0], item_dense_dim)
+            neg_emb_flat = model.item_tower(neg_items_flat.to(device), item_dense_neg.to(device))
+            neg_emb = neg_emb_flat.view(batch_size, num_neg, -1)
+
+            loss = bpr_loss(user_emb, pos_emb, neg_emb)
+
+            if training:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            total_loss += loss.item()
+
+    return total_loss / len(loader)
+
+
 def train(cfg):
     """
     Full two-tower training loop.
@@ -204,48 +253,65 @@ def train(cfg):
     )
 
     epochs = cfg["training"]["retrieval"]["epochs"]
+    patience = cfg["training"]["retrieval"]["early_stopping_patience"]
     user_dense_dim = cfg["features"]["user_dense_dim"]
     item_dense_dim = cfg["features"]["item_dense_dim"]
 
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0.0
+    # Validation exists to answer "how many epochs?" with evidence instead of a
+    # guess. The first full run showed why it matters: training loss bottomed at
+    # epoch 4 and drifted upward for the remaining 16, so the exported
+    # embeddings came from a model measurably worse than the best one seen.
+    val_df = pd.read_parquet("datastore/processed/interactions/val.parquet")
+    val_dataset = InteractionDataset(
+        val_df,
+        num_neg,
+        pos_threshold=cfg["features"]["positive_watch_ratio"],
+        neg_threshold=cfg["features"]["negative_watch_ratio"],
+        seed=cfg["project"]["seed"],
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=cfg["training"]["retrieval"]["batch_size"],
+        shuffle=False,
+        num_workers=0,
+    )
+    print(f"Validation pairs: {len(val_dataset):,}")
+
+    best_val = float("inf")
+    best_state = None
+    best_epoch = 0
+    epochs_without_improvement = 0
+
+    for epoch in range(1, epochs + 1):
         t0 = time.time()
-
-        for batch in loader:
-            batch_size = batch["user_id"].shape[0]
-
-            user_dense = torch.zeros(batch_size, user_dense_dim)
-            item_dense_pos = torch.zeros(batch_size, item_dense_dim)
-
-            user_emb, pos_emb = model(
-                batch["user_id"].to(device),
-                user_dense.to(device),
-                batch["pos_item"].to(device),
-                item_dense_pos.to(device),
-            )
-
-            neg_items_flat = batch["neg_items"].view(-1)
-            item_dense_neg = torch.zeros(neg_items_flat.shape[0], item_dense_dim)
-            neg_emb_flat = model.item_tower(neg_items_flat.to(device), item_dense_neg.to(device))
-            neg_emb = neg_emb_flat.view(batch_size, num_neg, -1)
-
-            loss = bpr_loss(user_emb, pos_emb, neg_emb)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
+        train_loss = run_epoch(model, loader, cfg, num_neg, device, optimizer)
+        val_loss = run_epoch(model, val_loader, cfg, num_neg, device)
         elapsed = time.time() - t0
-        avg_loss = total_loss / len(loader)
-        print(f"Epoch {epoch+1}/{epochs} — loss: {avg_loss:.4f} — {elapsed:.1f}s")
 
-    # Save last epoch checkpoint
+        marker = ""
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_epoch = epoch
+            epochs_without_improvement = 0
+            marker = "  <- best"
+        else:
+            epochs_without_improvement += 1
+
+        print(f"Epoch {epoch}/{epochs} — train: {train_loss:.4f} — "
+              f"val: {val_loss:.4f} — {elapsed:.1f}s{marker}")
+
+        if epochs_without_improvement >= patience:
+            print(f"Early stopping: no validation improvement in {patience} epochs.")
+            break
+
+    # Everything downstream must come from the best model, not the last one.
+    model.load_state_dict(best_state)
+    print(f"Restored best model from epoch {best_epoch} (val loss {best_val:.4f})")
+
     ckpt_dir = Path(cfg["training"]["retrieval"]["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), ckpt_dir / f"two_tower_epoch_{epochs}.pt")
+    torch.save(model.state_dict(), ckpt_dir / f"two_tower_best_epoch_{best_epoch}.pt")
 
     # Export item embeddings
     model.eval()

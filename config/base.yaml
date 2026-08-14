@@ -67,7 +67,8 @@ ranking:
 # fails deep inside the optimiser with a confusing type error.
 training:
   retrieval:
-    epochs: 20
+    epochs: 20                      # upper bound; early stopping usually ends sooner
+    early_stopping_patience: 3      # epochs without validation improvement
     batch_size: 1024
     lr: 0.001
     weight_decay: 0.00001
