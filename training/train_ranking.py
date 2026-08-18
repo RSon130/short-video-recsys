@@ -2,7 +2,9 @@
 MLP ranker training loop.
 
 Objective is set by config (ranking.objective):
-    pairwise    BPR over (positive, negative) pairs — optimises ordering
+    listwise    softmax over one positive and N negatives — optimises ordering
+                against several alternatives at once (sampled softmax / InfoNCE)
+    pairwise    BPR over a single (positive, negative) pair — the N=1 case
     regression  MSE against observed watch_ratio — optimises calibration
 
 Usage:
@@ -118,7 +120,8 @@ class PairwiseRankingDataset(Dataset):
         seed:          RNG seed for negative sampling.
     """
     def __init__(self, interactions, user_embs, item_embs, features,
-                 pos_threshold=0.7, neg_threshold=0.3, seed=42):
+                 pos_threshold=0.7, neg_threshold=0.3, seed=42, num_neg=1):
+        self.num_neg = num_neg
         self.user_embs = user_embs
         self.item_embs = item_embs
         self.features = features
@@ -159,23 +162,83 @@ class PairwiseRankingDataset(Dataset):
     def __getitem__(self, idx):
         return idx
 
+    def sample_negatives(self, uids, num_neg):
+        """Draw num_neg negatives per user from that user's own low-watch items."""
+        neg_iids = np.empty((len(uids), num_neg), dtype=np.int64)
+        for i, uid in enumerate(uids):
+            pool = self.neg_pools.get(int(uid), self.global_neg_pool)
+            neg_iids[i] = pool[self.rng.integers(0, len(pool), num_neg)]
+        return neg_iids
+
+    def build_rows(self, uids, iids):
+        """Feature matrix for paired id arrays, via the shared layout."""
+        return self.features.build_matrix(
+            self.user_embs[uids], self.item_embs[iids], uids, iids
+        )
+
     def collate(self, indices):
         """Build the positive and negative feature matrices for one batch."""
         indices = np.asarray(indices, dtype=np.int64)
         uids = self.uids[indices]
         pos_iids = self.pos_iids[indices]
-
-        neg_iids = np.empty(len(uids), dtype=np.int64)
-        for i, uid in enumerate(uids):
-            pool = self.neg_pools.get(int(uid), self.global_neg_pool)
-            neg_iids[i] = pool[self.rng.integers(0, len(pool))]
+        neg_iids = self.sample_negatives(uids, self.num_neg)[:, 0]
 
         return {
-            "x_pos": torch.from_numpy(self.features.build_matrix(
-                self.user_embs[uids], self.item_embs[pos_iids], uids, pos_iids)),
-            "x_neg": torch.from_numpy(self.features.build_matrix(
-                self.user_embs[uids], self.item_embs[neg_iids], uids, neg_iids)),
+            "x_pos": torch.from_numpy(self.build_rows(uids, pos_iids)),
+            "x_neg": torch.from_numpy(self.build_rows(uids, neg_iids)),
         }
+
+
+class ListwiseRankingDataset(PairwiseRankingDataset):
+    """
+    Emits one positive against `num_neg` negatives, scored as a single list.
+
+    Pairwise BPR asks "does the user prefer this positive to this one negative?".
+    Listwise asks "does the positive rank first among these num_neg + 1 items?",
+    which is the question recall@K actually poses. Each update sees num_neg
+    contrasts instead of one, so the gradient is better conditioned — this is why
+    large-scale rankers use a sampled softmax rather than a single pair.
+
+    The loss is softmax cross-entropy over the candidate scores with the positive
+    at index 0 (the same object as InfoNCE / sampled softmax). Negatives are
+    drawn exactly as in the pairwise case: from the same user's own low-engagement
+    items, so no cross-user popularity signal leaks in.
+
+    Note that pairwise is the num_neg=1 special case of this framing, which is why
+    the sampling and feature assembly are inherited rather than reimplemented.
+    """
+    def collate(self, indices):
+        indices = np.asarray(indices, dtype=np.int64)
+        uids = self.uids[indices]
+        pos_iids = self.pos_iids[indices]
+        neg_iids = self.sample_negatives(uids, self.num_neg)
+
+        # Candidate 0 is the positive; the rest are negatives.
+        candidates = np.concatenate([pos_iids[:, None], neg_iids], axis=1)
+        n_candidates = candidates.shape[1]
+
+        flat_uids = np.repeat(uids, n_candidates)
+        flat_iids = candidates.ravel()
+
+        return {
+            "x": torch.from_numpy(self.build_rows(flat_uids, flat_iids)),
+            "n_candidates": n_candidates,
+        }
+
+
+def listwise_loss(scores, n_candidates):
+    """
+    Softmax cross-entropy over one positive and n_candidates-1 negatives.
+
+    scores arrives flat, one row per (user, candidate) pair, grouped so that each
+    block of n_candidates belongs to one user with the positive first. Reshaping
+    to (batch, n_candidates) and taking cross-entropy against target 0 maximises
+    the probability that the positive ranks above every sampled negative at once,
+    rather than beating one of them at a time.
+    """
+    scores = scores.view(-1, n_candidates)
+    target = torch.zeros(scores.shape[0], dtype=torch.long, device=scores.device)
+    return F.cross_entropy(scores, target)
 
 
 def pairwise_loss(pos_scores, neg_scores):
@@ -230,16 +293,18 @@ def train(cfg):
 
     batch_size = cfg["training"]["ranking"]["batch_size"]
     objective = cfg["ranking"]["objective"]
-    if objective not in ("pairwise", "regression"):
+    if objective not in ("listwise", "pairwise", "regression"):
         raise ValueError(f"Unknown ranking.objective: {objective!r}")
 
     def make_dataset(df):
-        if objective == "pairwise":
-            return PairwiseRankingDataset(
+        if objective in ("listwise", "pairwise"):
+            cls = ListwiseRankingDataset if objective == "listwise" else PairwiseRankingDataset
+            return cls(
                 df, user_embs, item_embs, features,
                 pos_threshold=cfg["features"]["positive_watch_ratio"],
                 neg_threshold=cfg["features"]["negative_watch_ratio"],
                 seed=cfg["project"]["seed"],
+                num_neg=cfg["features"]["num_neg_samples"] if objective == "listwise" else 1,
             )
         return RankingDataset(df, user_embs, item_embs, features)
 
@@ -268,6 +333,9 @@ def train(cfg):
 
     def batch_loss(batch):
         """Loss for one batch under the configured objective."""
+        if objective == "listwise":
+            scores = model(batch["x"].to(device)).squeeze(1)
+            return listwise_loss(scores, batch["n_candidates"])
         if objective == "pairwise":
             pos = model(batch["x_pos"].to(device)).squeeze(1)
             neg = model(batch["x_neg"].to(device)).squeeze(1)

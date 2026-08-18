@@ -77,8 +77,11 @@ ranking:
   dropout: 0.1
 
   # Training objective.
-  #   pairwise    BPR over (positive, negative) pairs from the same user.
-  #               Optimises ordering, which is what recall@K rewards.
+  #   listwise    Softmax cross-entropy over one positive and num_neg_samples
+  #               negatives from the same user (sampled softmax / InfoNCE).
+  #               Optimises "does the positive rank first", which is the question
+  #               recall@K poses. Each step sees several contrasts, not one.
+  #   pairwise    BPR over a single (positive, negative) pair — the N=1 case.
   #   regression  MSE against observed watch_ratio. Optimises calibration.
   #
   # Measured on big_matrix (6,873 test users) with the regression objective:
@@ -86,7 +89,7 @@ ranking:
   # time well — yet dropped recall@5 from 0.0191 (retrieval alone) to 0.0031.
   # Good calibration, bad ordering. Retrieval trains with a ranking loss and
   # behaved correctly at that scale; the ranker now uses the same framing.
-  objective: pairwise
+  objective: listwise
   # Single task. Multi-task (watch + like) is future work.
 
 # Note on number formats: write learning rates as plain decimals (0.001), not
