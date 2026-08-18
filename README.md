@@ -231,7 +231,7 @@ retrieval/       faiss_index.py
 serving/         FastAPI api.py
 evaluation/      metrics.py, baselines.py, ab_test.py
 scripts/         download_kuairec.py, build_index.py, evaluate.py
-docs/            system_design.md, progress.md, learning_guide.md
+docs/            system_design.md, engineering_log.md, progress.md, learning_guide.md
 ```
 
 ## Stack
