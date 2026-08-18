@@ -189,10 +189,11 @@ On the sparse subset popularity collapses and personalisation wins outright.
 
 Same network, same features, same candidates — only the loss changed:
 
-| objective | recall@5 | recall@10 | watch-time AUC |
-|---|---|---|---|
-| MSE on `watch_ratio` | 0.0031 | 0.0070 | **0.714** |
-| pairwise BPR | **0.0112** (×3.6) | **0.0141** (×2.0) | 0.622 |
+| objective | recall@5 | recall@10 | recall@20 | watch-time AUC |
+|---|---|---|---|---|
+| pointwise — MSE on `watch_ratio` | 0.0031 | 0.0070 | 0.0093 | **0.714** |
+| **pairwise — BPR** | **0.0112** | **0.0141** | 0.0099 | 0.622 |
+| listwise — sampled softmax (N=4) | 0.0081 | 0.0099 | **0.0100** | 0.609 |
 
 MSE optimises *calibration* and duly wins the metric that rewards calibration.
 Recall@K rewards *ordering*, and a regression head minimising squared error is
@@ -206,16 +207,40 @@ stage optimising something other than the metric it was judged on.
 The trade is visible: watch-time AUC falls 0.714 → 0.622. A multi-task head
 would recover both.
 
+### Listwise did not beat pairwise — a prediction that failed
+
+Sampling several negatives per step and taking a softmax normally beats a single
+pair; it is why large-scale rankers use sampled softmax. Here it lost: recall@5
+0.0081 against pairwise's 0.0112.
+
+**Hypothesis tested and refuted.** The obvious suspect was degenerate sampling —
+drawing 4 negatives with replacement from a small per-user pool would yield
+duplicates and a softmax with redundant candidates. Measured on `big_matrix`:
+median pool is **233 items**, mean 282, and only **1% of users** have fewer than
+10. Duplicates are not the problem.
+
+**Hypothesis still untested.** Saturation. With four *easy* random negatives the
+softmax is satisfied the moment the positive outranks all of them, so gradients
+shrink faster than single-pair BPR's, which keeps drawing a fresh comparison each
+step. If that is the mechanism, the fix is harder negatives rather than more of
+them — sample from retrieval's shortlist, which is the distribution the ranker
+actually faces at inference, instead of from the whole low-watch pool.
+
+Worth stating plainly: this is a negative result recorded as such. `pairwise`
+remains the default because it measured best, not because the theory preferred
+it. Both objectives stay selectable so the comparison is reproducible.
+
 ---
 
 ## Open work
 
-- **Listwise objective.** The pairwise loss compares one positive against one
-  negative per step. A softmax/listwise loss over one positive and N sampled
-  negatives uses more of each batch and directly optimises the probability that
-  the positive ranks first; LambdaRank-style weighting goes further, scaling each
-  pair by its effect on NDCG. This is the natural next step and reuses the
-  existing sampling machinery.
+- **Hard-negative mining** — the highest-value open item. Both unexplained
+  results point at it: listwise gained nothing from more *easy* negatives, and
+  retrieval still leads at K=5. Sampling negatives from retrieval's top-200
+  shortlist trains the ranker on the distribution it actually sees at inference.
+- **LambdaRank-style weighting**, scaling each pair by its effect on NDCG, is the
+  metric-aware step beyond listwise. Worth trying only after hard negatives —
+  the sampling distribution looks like the binding constraint, not the loss form.
 - **Multi-task head** — ranking loss for ordering plus regression for calibrated
   watch-time, recovering the AUC the pairwise objective trades away.
 - **Stronger candidate generation.** The ranker's ceiling is retrieval's

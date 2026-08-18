@@ -61,13 +61,14 @@ recall@10, +152% ndcg@10**. Retrieval alone beats it by **+266% recall@5**. At a
 
 ### The ranker's objective matters more than its architecture
 
-The same network, the same features, the same candidates — only the loss
-changed:
+The same network, the same features, the same candidates — only the loss changed.
+All three objectives are implemented and selectable via `ranking.objective`:
 
-| | recall@5 | recall@10 | watch-AUC |
-|---|---|---|---|
-| MSE on watch_ratio | 0.0031 | 0.0070 | **0.714** |
-| pairwise BPR | **0.0112** (×3.6) | **0.0141** (×2.0) | 0.622 |
+| objective | recall@5 | recall@10 | recall@20 | watch-AUC |
+|---|---|---|---|---|
+| pointwise — MSE on watch_ratio | 0.0031 | 0.0070 | 0.0093 | **0.714** |
+| **pairwise — BPR** | **0.0112** | **0.0141** | 0.0099 | 0.622 |
+| listwise — sampled softmax | 0.0081 | 0.0099 | **0.0100** | 0.609 |
 
 MSE optimises *calibration* — how much of a video someone will watch — and it
 wins on watch-time AUC, which is exactly the metric that rewards calibration.
@@ -84,9 +85,21 @@ The trade is visible and expected: watch-time AUC falls from 0.714 to 0.622.
 A production system wanting both would use a multi-task head — ranking loss for
 ordering, regression for calibrated watch-time prediction.
 
-Retrieval still leads at K=5 and K=20. The ranker sees only what retrieval
-passes it, so its ceiling is retrieval's shortlist; closing that gap is about
-candidate generation, not the ranker.
+**Listwise did not beat pairwise**, contrary to expectation — sampling more
+negatives per step usually helps, which is why large-scale rankers use a sampled
+softmax. One explanation was tested and refuted: per-user negative pools are
+large (median 233 items; only 1% of users below 10), so drawing 4 with
+replacement is not collapsing to duplicates.
+
+The remaining hypothesis is untested: with four *easy* random negatives the
+softmax is satisfied as soon as the positive outranks all of them, so gradients
+vanish earlier in training than single-pair BPR's. If that is right, the fix is
+harder negatives rather than more of them — sampling from retrieval's shortlist
+instead of the whole low-watch pool.
+
+Retrieval still leads at K=5 and K=20. The ranker only ever sees what retrieval
+passes it, so its ceiling is retrieval's shortlist. Both open threads therefore
+point at the same place: **candidate generation, not the ranker.**
 
 ### `small_matrix` — 4.68M interactions, all 1,411 test users
 

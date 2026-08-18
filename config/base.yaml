@@ -84,12 +84,27 @@ ranking:
   #   pairwise    BPR over a single (positive, negative) pair — the N=1 case.
   #   regression  MSE against observed watch_ratio. Optimises calibration.
   #
-  # Measured on big_matrix (6,873 test users) with the regression objective:
-  # the ranker lifted watch-time AUC from 0.482 to 0.714 — it predicts watch
-  # time well — yet dropped recall@5 from 0.0191 (retrieval alone) to 0.0031.
-  # Good calibration, bad ordering. Retrieval trains with a ranking loss and
-  # behaved correctly at that scale; the ranker now uses the same framing.
-  objective: listwise
+  # Measured on big_matrix, all 6,873 test users:
+  #
+  #   objective     recall@5  recall@10  recall@20  watch-AUC
+  #   regression      0.0031     0.0070     0.0093      0.714
+  #   pairwise        0.0112     0.0141     0.0099      0.622
+  #   listwise        0.0081     0.0099     0.0100      0.609
+  #
+  # regression optimises calibration and duly wins watch-AUC while losing badly
+  # on ordering. pairwise wins the ranking metrics and is the default.
+  #
+  # listwise did NOT beat pairwise, contrary to expectation — more negatives per
+  # step usually helps. One hypothesis was tested and refuted: per-user negative
+  # pools are large (median 233; only 1% of users below 10), so sampling 4 with
+  # replacement is not collapsing to duplicates. The untested explanation is
+  # saturation — with four *easy* random negatives the softmax is satisfied as
+  # soon as the positive outranks all of them, so late-training gradients vanish
+  # faster than single-pair BPR's. If so the fix is harder negatives, not more of
+  # them: sample from retrieval's shortlist rather than from the whole low-watch
+  # pool. That is the next experiment, and it points at the same place the
+  # unclosed recall@5 gap does — candidate generation.
+  objective: pairwise
   # Single task. Multi-task (watch + like) is future work.
 
 # Note on number formats: write learning rates as plain decimals (0.001), not
