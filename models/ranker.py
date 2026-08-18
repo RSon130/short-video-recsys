@@ -4,6 +4,7 @@ MLP ranker — predicts watch_ratio from a concatenated feature vector.
 Input: [user_emb || item_emb || user_dense_features || item_dense_features]
 Output: scalar in [0, 1] (sigmoid-activated)
 """
+import torch
 import torch.nn as nn
 
 
@@ -23,9 +24,12 @@ class MLPRanker(nn.Module):
         shape: (batch, 2*embedding_dim + user_dense_dim + item_dense_dim)
 
     Output:
-        Predicted watch_ratio ∈ [0, 1], shape (batch, 1).
-        Sigmoid activation ensures the output is always a valid probability.
-        Trained with MSE loss against the observed watch_ratio.
+        Raw score, shape (batch, 1) — see forward(). predict() applies a sigmoid
+        for a calibrated watch_ratio in [0, 1].
+
+    Training objective is selected by config (ranking.objective):
+        pairwise    BPR over (positive, negative) pairs — optimises ordering
+        regression  MSE against observed watch_ratio — optimises calibration
 
     Args:
         input_dim:   Total dimension of the concatenated feature vector.
@@ -42,18 +46,39 @@ class MLPRanker(nn.Module):
             layers.append(nn.Dropout(dropout))
             prev = h
         layers.append(nn.Linear(prev, 1))
-        layers.append(nn.Sigmoid())
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         """
+        Score candidates as raw logits.
+
+        The final Sigmoid used to live inside the network. It was moved out so
+        the pairwise objective can operate on unbounded scores: a sigmoid
+        squashes every score into [0, 1], which compresses the margin between a
+        positive and a negative and flattens the gradient exactly where the
+        ranking loss needs signal. Sigmoid is monotonic, so ordering — and
+        therefore every ranking metric — is identical either way; only the
+        gradients differ.
+
+        Use predict() when a calibrated watch_ratio in [0, 1] is wanted.
+
         Args:
             x: Float tensor of shape (batch, input_dim).
 
         Returns:
-            Predicted watch_ratio, shape (batch, 1), values in [0, 1].
+            Unbounded scores, shape (batch, 1). Higher means more relevant.
         """
         return self.net(x)
+
+    def predict(self, x):
+        """
+        Calibrated watch_ratio prediction in [0, 1].
+
+        Ranking by predict() and ranking by forward() produce the same order.
+        This exists for the serving contract, which reports a watch_ratio, and
+        for the regression objective, whose MSE target lives in [0, 1].
+        """
+        return torch.sigmoid(self.net(x))
 
 
 def build_ranker(cfg, user_dense_dim: int = None, item_dense_dim: int = None) -> MLPRanker:

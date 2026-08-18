@@ -34,10 +34,11 @@ def test_output_shape(ranker):
         assert ranker(x).shape == (32, 1)
 
 
-def test_output_range(ranker):
+def test_predict_output_range(ranker):
+    """forward() returns unbounded scores; predict() is the calibrated head."""
     x = torch.randn(1000, 160)
     with torch.no_grad():
-        out = ranker(x)
+        out = ranker.predict(x)
     assert out.min() >= 0.0
     assert out.max() <= 1.0
 
@@ -48,8 +49,15 @@ def test_output_is_differentiable(cfg):
     out.sum().backward()
 
 
-def test_last_activation_is_sigmoid(ranker):
-    assert isinstance(ranker.net[-1], nn.Sigmoid)
+def test_network_ends_in_a_linear_score(ranker):
+    """
+    The sigmoid was moved out of the network so the pairwise objective can work
+    on unbounded scores — squashing compresses the positive/negative margin and
+    flattens the gradient where the ranking loss needs it. predict() reapplies
+    it for the serving contract.
+    """
+    assert isinstance(ranker.net[-1], nn.Linear)
+    assert ranker.net[-1].out_features == 1
 
 
 def test_hidden_output_dims(ranker):

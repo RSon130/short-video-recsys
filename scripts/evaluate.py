@@ -121,7 +121,7 @@ def score_systems(cfg, users, ground_truth, top_k_final):
 
         x = torch.from_numpy(features.build_batch(u_emb, item_embs, uid, candidates))
         with torch.no_grad():
-            rank_scores = ranker(x).squeeze(-1).numpy()
+            rank_scores = ranker.predict(x).squeeze(-1).numpy()
 
         by_retrieval = sorted(
             zip(candidates, ret_scores), key=lambda t: t[1], reverse=True

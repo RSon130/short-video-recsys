@@ -183,7 +183,7 @@ async def recommend(request: RecommendRequest) -> RecommendResponse:
         _features.build_batch(user_emb, _item_embeddings, internal_uid, item_indices)
     )
     with torch.no_grad():
-        rank_scores = _ranker(x).squeeze(-1).numpy()
+        rank_scores = _ranker.predict(x).squeeze(-1).numpy()
 
     ranked = [(int(iid), float(s)) for iid, s in zip(item_indices, rank_scores)]
     ranked.sort(key=lambda t: t[1], reverse=True)

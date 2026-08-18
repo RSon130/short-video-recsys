@@ -75,7 +75,19 @@ ranking:
   # what is a plain MLP. Renamed so the config matches the model.
   hidden_dims: [256, 128]
   dropout: 0.1
-  # Single task: regress watch_ratio with MSE. Multi-task is future work.
+
+  # Training objective.
+  #   pairwise    BPR over (positive, negative) pairs from the same user.
+  #               Optimises ordering, which is what recall@K rewards.
+  #   regression  MSE against observed watch_ratio. Optimises calibration.
+  #
+  # Measured on big_matrix (6,873 test users) with the regression objective:
+  # the ranker lifted watch-time AUC from 0.482 to 0.714 — it predicts watch
+  # time well — yet dropped recall@5 from 0.0191 (retrieval alone) to 0.0031.
+  # Good calibration, bad ordering. Retrieval trains with a ranking loss and
+  # behaved correctly at that scale; the ranker now uses the same framing.
+  objective: pairwise
+  # Single task. Multi-task (watch + like) is future work.
 
 # Note on number formats: write learning rates as plain decimals (0.001), not
 # as 1e-3. PyYAML follows YAML 1.1, where an exponent needs a decimal point and

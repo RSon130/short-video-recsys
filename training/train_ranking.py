@@ -1,5 +1,9 @@
 """
-MLP ranker training loop (MSE loss on watch_ratio).
+MLP ranker training loop.
+
+Objective is set by config (ranking.objective):
+    pairwise    BPR over (positive, negative) pairs — optimises ordering
+    regression  MSE against observed watch_ratio — optimises calibration
 
 Usage:
     python training/train_ranking.py
@@ -14,6 +18,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from config_loader import load_config
@@ -81,6 +86,110 @@ class RankingDataset(Dataset):
         }
 
 
+class PairwiseRankingDataset(Dataset):
+    """
+    Emits (user, positive item, negative item) triples for a ranking objective.
+
+    Why the ranker moved off MSE
+    ----------------------------
+    The ranker was trained to regress watch_ratio with MSE. That optimises
+    *calibration* — predicting how much of a video someone will watch — and it
+    did so well, lifting watch-time AUC from 0.482 to 0.714 on big_matrix. But
+    the metric that matters for a feed is recall@K: are the items the user
+    actually wants in the top few slots? A regression head minimising squared
+    error is pulled toward the conditional mean, and on the sparse big_matrix
+    split that reordering made a good shortlist worse — the full pipeline
+    scored below retrieval alone at every cutoff under 20 (recall@5 0.0031 vs
+    0.0191).
+
+    Retrieval was trained with a ranking loss (BPR) and behaved correctly at
+    that scale. The ranker now uses the same framing and the same labels: a
+    positive is watch_ratio >= pos_threshold, a negative is the *same user's*
+    item at <= neg_threshold, and the loss only ever compares two items the
+    same user saw.
+
+    Args:
+        interactions:  DataFrame with user_id, item_id, watch_ratio.
+        user_embs:     (n_users, emb_dim) array.
+        item_embs:     (n_items, emb_dim) array.
+        features:      DenseFeatureStore, shared with evaluation and serving.
+        pos_threshold: Minimum watch_ratio for a positive.
+        neg_threshold: Maximum watch_ratio for a negative.
+        seed:          RNG seed for negative sampling.
+    """
+    def __init__(self, interactions, user_embs, item_embs, features,
+                 pos_threshold=0.7, neg_threshold=0.3, seed=42):
+        self.user_embs = user_embs
+        self.item_embs = item_embs
+        self.features = features
+        self.user_dense_dim = features.user_dense_dim
+        self.item_dense_dim = features.item_dense_dim
+        self.rng = np.random.default_rng(seed)
+
+        positives = interactions.loc[
+            interactions[Cols.WATCH_RATIO] >= pos_threshold,
+            [Cols.USER_ID, Cols.ITEM_ID],
+        ].to_numpy(dtype=np.int64)
+        if len(positives) == 0:
+            raise ValueError(
+                f"No interactions with watch_ratio >= {pos_threshold}; "
+                f"nothing to rank."
+            )
+        self.uids = positives[:, 0]
+        self.pos_iids = positives[:, 1]
+
+        negatives = interactions.loc[
+            interactions[Cols.WATCH_RATIO] <= neg_threshold,
+            [Cols.USER_ID, Cols.ITEM_ID],
+        ]
+        self.neg_pools = {
+            int(uid): group.to_numpy(dtype=np.int64)
+            for uid, group in negatives.groupby(Cols.USER_ID)[Cols.ITEM_ID]
+        }
+        self.global_neg_pool = negatives[Cols.ITEM_ID].to_numpy(dtype=np.int64)
+        if len(self.global_neg_pool) == 0:
+            raise ValueError(
+                f"No interactions with watch_ratio <= {neg_threshold}; "
+                f"no negatives available."
+            )
+
+    def __len__(self):
+        return len(self.uids)
+
+    def __getitem__(self, idx):
+        return idx
+
+    def collate(self, indices):
+        """Build the positive and negative feature matrices for one batch."""
+        indices = np.asarray(indices, dtype=np.int64)
+        uids = self.uids[indices]
+        pos_iids = self.pos_iids[indices]
+
+        neg_iids = np.empty(len(uids), dtype=np.int64)
+        for i, uid in enumerate(uids):
+            pool = self.neg_pools.get(int(uid), self.global_neg_pool)
+            neg_iids[i] = pool[self.rng.integers(0, len(pool))]
+
+        return {
+            "x_pos": torch.from_numpy(self.features.build_matrix(
+                self.user_embs[uids], self.item_embs[pos_iids], uids, pos_iids)),
+            "x_neg": torch.from_numpy(self.features.build_matrix(
+                self.user_embs[uids], self.item_embs[neg_iids], uids, neg_iids)),
+        }
+
+
+def pairwise_loss(pos_scores, neg_scores):
+    """
+    BPR loss over ranker scores: -log sigma(score_pos - score_neg).
+
+    Identical in form to the retrieval loss, applied to ranker outputs. Only
+    the score difference matters, so the ranker is free to place scores
+    anywhere on the real line as long as the ordering is right — which is
+    exactly what recall@K rewards.
+    """
+    return -F.logsigmoid(pos_scores - neg_scores).mean()
+
+
 def get_device(cfg):
     """
     Resolve the compute device from config (same logic as in train_retrieval).
@@ -120,13 +229,28 @@ def train(cfg):
     features = DenseFeatureStore.load()
 
     batch_size = cfg["training"]["ranking"]["batch_size"]
-    dataset = RankingDataset(train_df, user_embs, item_embs, features)
+    objective = cfg["ranking"]["objective"]
+    if objective not in ("pairwise", "regression"):
+        raise ValueError(f"Unknown ranking.objective: {objective!r}")
+
+    def make_dataset(df):
+        if objective == "pairwise":
+            return PairwiseRankingDataset(
+                df, user_embs, item_embs, features,
+                pos_threshold=cfg["features"]["positive_watch_ratio"],
+                neg_threshold=cfg["features"]["negative_watch_ratio"],
+                seed=cfg["project"]["seed"],
+            )
+        return RankingDataset(df, user_embs, item_embs, features)
+
+    dataset = make_dataset(train_df)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         num_workers=0, collate_fn=dataset.collate)
 
-    val_dataset = RankingDataset(val_df, user_embs, item_embs, features)
+    val_dataset = make_dataset(val_df)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
                             num_workers=0, collate_fn=val_dataset.collate)
+    print(f"Ranker objective: {objective}")
     print(f"Ranker training rows: {len(dataset):,} | validation rows: {len(val_dataset):,}")
 
     device = get_device(cfg)
@@ -142,14 +266,24 @@ def train(cfg):
     epochs = cfg["training"]["ranking"]["epochs"]
     patience = cfg["training"]["ranking"]["early_stopping_patience"]
 
+    def batch_loss(batch):
+        """Loss for one batch under the configured objective."""
+        if objective == "pairwise":
+            pos = model(batch["x_pos"].to(device)).squeeze(1)
+            neg = model(batch["x_neg"].to(device)).squeeze(1)
+            return pairwise_loss(pos, neg)
+        # Regression compares against watch_ratio in [0, 1], so it needs the
+        # calibrated head rather than the raw score.
+        preds = model.predict(batch["x"].to(device)).squeeze(1)
+        return criterion(preds, batch["label"].to(device))
+
     def run_epoch(data_loader, train_mode):
         """One pass over data_loader. Shared so the two paths cannot diverge."""
         model.train() if train_mode else model.eval()
         total = 0.0
         with torch.set_grad_enabled(train_mode):
             for batch in data_loader:
-                preds = model(batch["x"].to(device)).squeeze(1)
-                loss = criterion(preds, batch["label"].to(device))
+                loss = batch_loss(batch)
                 if train_mode:
                     optimizer.zero_grad()
                     loss.backward()
@@ -186,7 +320,7 @@ def train(cfg):
             break
 
     model.load_state_dict(best_state)
-    print(f"Restored best ranker from epoch {best_epoch} (val mse {best_val:.6f})")
+    print(f"Restored best ranker from epoch {best_epoch} (val {best_val:.6f})")
 
     torch.save(model.state_dict(), "datastore/processed/ranker_model.pt")
 
