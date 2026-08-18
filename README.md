@@ -9,22 +9,26 @@ Pinterest.
 ```
 Request
   └─ Stage 1 · Retrieval   Two-Tower (BPR) + FAISS IndexFlatIP → top-200 candidates
-  └─ Stage 2 · Ranking     MLP ranker (MSE on watch_ratio)     → top-K scored items
+  └─ Stage 2 · Ranking     MLP ranker (pairwise BPR loss)      → top-K scored items
   └─ Serving               FastAPI + in-memory TTL cache
 ```
 
 ## Dataset
 
-| | |
-|---|---|
-| Interactions | **4,676,570** |
-| Users × items | 1,411 × 3,327 |
-| Matrix density | **99.6%** (fully observed) |
-| Split | temporal 80/10/10 — 3.74M train, 468K val, 468K test |
+KuaiRec ships two subsets, and the system was measured on both. `small_matrix`
+is *fully observed* — nearly every (user, item) pair carries a real
+`watch_ratio` — which invalidates several standard recipes and drives most of
+the design decisions below.
 
-KuaiRec is *fully observed*: nearly every (user, item) pair carries a real
-`watch_ratio`. That single property drives most of the design decisions below,
-and it invalidates several standard recipes.
+| | `small_matrix` | `big_matrix` |
+|---|---|---|
+| Interactions | 4,676,570 | **12,529,113** |
+| Users × items | 1,411 × 3,327 | 7,176 × 9,958 |
+| Density | **99.6%** | 17.5% |
+| Split | temporal 80/10/10 | temporal 80/10/10 |
+
+Default config runs `big_matrix`; switch the `interaction_file` in
+`config/kuairec.yaml` for the dense subset.
 
 ## Results
 
@@ -45,26 +49,44 @@ the system depends on catalogue size and density.**
 | system | recall@5 | recall@10 | ndcg@10 | recall@20 | watch-AUC |
 |---|---|---|---|---|---|
 | popularity baseline | 0.0052 | 0.0055 | 0.0052 | 0.0061 | — |
-| **retrieval only** | **0.0191** | **0.0131** | **0.0130** | 0.0134 | 0.482 |
-| full pipeline | 0.0031 | 0.0070 | 0.0055 | 0.0093 | 0.714 |
+| retrieval only | **0.0191** | 0.0131 | 0.0130 | **0.0134** | 0.482 |
+| full pipeline — ranker on MSE | 0.0031 | 0.0070 | 0.0055 | 0.0093 | **0.714** |
+| **full pipeline — ranker on pairwise loss** | 0.0112 | **0.0141** | **0.0131** | 0.0099 | 0.622 |
 
-Retrieval beats popularity by **+266% recall@5** and **+136% recall@10**. This is
-the two-tower doing the job it exists for: at a 1.1% base rate a non-personalised
-list stops working, and narrowing 8,771 candidates to 200 has real value.
+The full pipeline beats popularity at every cutoff — **+115% recall@5, +155%
+recall@10, +152% ndcg@10**. Retrieval alone beats it by **+266% recall@5**. At a
+1.1% relevance base rate a non-personalised list stops working, and narrowing
+8,771 candidates to 200 has real value — the opposite of `small_matrix`, where a
+25% base rate made popularity unbeatable.
 
-**The MLP ranker degrades top-K recall at this scale** — the full pipeline scores
-below retrieval alone at every cutoff below 20. It is not a sampling artifact;
-the pattern is identical on a 300-user sample and on all 6,873.
+### The ranker's objective matters more than its architecture
 
-The cause is objective misalignment. The ranker is trained with **MSE on
-`watch_ratio`**, which optimises calibrated engagement prediction — and it does
-that well, lifting watch-time AUC from 0.482 to 0.714. But recall@K rewards
-placing `watch_ratio >= 0.7` items in the top few slots, and a regression head
-minimising squared error is pulled toward the conditional mean. Retrieval was
-trained with a *ranking* loss (BPR); the ranker was not. Put plainly: the ranker
-is better at predicting how much someone will watch and worse at choosing what
-to show them. Replacing MSE with a pairwise ranking loss over the same
-positive/negative definition retrieval uses is the open work item.
+The same network, the same features, the same candidates — only the loss
+changed:
+
+| | recall@5 | recall@10 | watch-AUC |
+|---|---|---|---|
+| MSE on watch_ratio | 0.0031 | 0.0070 | **0.714** |
+| pairwise BPR | **0.0112** (×3.6) | **0.0141** (×2.0) | 0.622 |
+
+MSE optimises *calibration* — how much of a video someone will watch — and it
+wins on watch-time AUC, which is exactly the metric that rewards calibration.
+But recall@K rewards *ordering*, and a regression head minimising squared error
+is pulled toward the conditional mean, flattening the distinctions that decide
+the top slots. Under MSE the full pipeline scored below retrieval alone at every
+cutoff; under a ranking loss it overtakes retrieval at K=10 and beats popularity
+everywhere.
+
+Retrieval had trained with a ranking loss (BPR) from the start. The ranker was
+the only stage optimising something other than the metric it was judged on.
+
+The trade is visible and expected: watch-time AUC falls from 0.714 to 0.622.
+A production system wanting both would use a multi-task head — ranking loss for
+ordering, regression for calibrated watch-time prediction.
+
+Retrieval still leads at K=5 and K=20. The ranker sees only what retrieval
+passes it, so its ceiling is retrieval's shortlist; closing that gap is about
+candidate generation, not the ranker.
 
 ### `small_matrix` — 4.68M interactions, all 1,411 test users
 
@@ -218,9 +240,11 @@ PyTorch · FAISS · FastAPI · Docker · pandas/NumPy · pytest (157 tests)
 
 ## Next
 
-- **Replace the ranker's MSE objective with a pairwise ranking loss.** The
-  measurements above make the case: MSE optimises engagement calibration
-  (AUC 0.482 → 0.714) while costing top-K recall at scale. The ranker should be
-  trained on the same positive/negative pairs retrieval uses.
+- **Multi-task ranking head** — a ranking loss for ordering plus a regression
+  head for calibrated watch-time, recovering the AUC the pairwise objective
+  trades away (0.714 → 0.622) without giving back top-K recall.
+- **Stronger candidate generation.** The ranker's ceiling is retrieval's
+  shortlist; retrieval still leads at K=5. Hard-negative mining and multi-source
+  recall (popularity + tag similarity) target that directly.
 - Deploy to GCP Cloud Run and measure p50/p95 under load.
 - Multi-task ranking (watch + like), then a Transformer ranker.

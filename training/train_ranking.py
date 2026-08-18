@@ -298,13 +298,13 @@ def train(cfg):
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
-        train_mse = run_epoch(loader, True)
-        val_mse = run_epoch(val_loader, False)
+        train_loss = run_epoch(loader, True)
+        val_loss = run_epoch(val_loader, False)
         elapsed = time.time() - t0
 
         marker = ""
-        if val_mse < best_val:
-            best_val = val_mse
+        if val_loss < best_val:
+            best_val = val_loss
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             best_epoch = epoch
             epochs_without_improvement = 0
@@ -312,8 +312,8 @@ def train(cfg):
         else:
             epochs_without_improvement += 1
 
-        print(f"Epoch {epoch}/{epochs} — train mse: {train_mse:.6f} — "
-              f"val mse: {val_mse:.6f} — {elapsed:.1f}s{marker}")
+        print(f"Epoch {epoch}/{epochs} — train {objective}: {train_loss:.6f} — "
+              f"val {objective}: {val_loss:.6f} — {elapsed:.1f}s{marker}")
 
         if epochs_without_improvement >= patience:
             print(f"Early stopping: no validation improvement in {patience} epochs.")
