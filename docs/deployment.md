@@ -35,10 +35,16 @@ Quote the **cold** numbers. The warm figures measure the cache, not the model.
 `us-central1`, 1 vCPU / 2Gi, `min-instances 0`, 500 requests at concurrency 4,
 driven from a laptop in the Bay Area.
 
-| | p50 | p95 | p99 |
-|---|---|---|---|
-| **cold** — distinct users, every request a cache miss | 62.0 ms | **74.6 ms** | 117.2 ms |
-| warm — 10 users reused, ~98% cache hits | 71.3 ms | 82.2 ms | 106.9 ms |
+| | p50 | p95 | p99 | server-side p95 |
+|---|---|---|---|---|
+| cold, run 1 (500 req) | 62.0 ms | 74.6 ms | 117.2 ms | 2.5 ms |
+| cold, run 2 (500 req, post-redeploy) | 64.5 ms | 105.1 ms | 148.7 ms | 2.8 ms |
+| warm, run 1 (~98% cache hits) | 71.3 ms | 82.2 ms | 106.9 ms | 0.0 ms |
+
+A third run taken immediately after deploying a new revision showed p99 298 ms
+and max 332 ms — cold starts, with `min-instances 0`, while instances were still
+spinning up. Discarded as unrepresentative of steady state and recorded here so
+the omission is visible rather than silent.
 
 **Server-side p95: 2.5 ms.** That is the model path — FAISS over 9,958 items,
 feature assembly for 200 candidates, one batched ranker forward pass — and it is

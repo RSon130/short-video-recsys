@@ -280,14 +280,20 @@ Deployed on **GCP Cloud Run** (`us-central1`, 1 vCPU / 2Gi, scale-to-zero).
 500 requests at concurrency 4, driven from a laptop; cold and warm reported
 separately.
 
-| | p50 | p95 | p99 |
-|---|---|---|---|
-| **cold** — every request a cache miss | 62.0 ms | **74.6 ms** | 117.2 ms |
-| warm — ~98% cache hits | 71.3 ms | 82.2 ms | 106.9 ms |
+| | p50 | p95 | p99 | server-side p95 |
+|---|---|---|---|---|
+| run 1 (500 req) | 62.0 ms | 74.6 ms | 117.2 ms | **2.5 ms** |
+| run 2 (500 req, after redeploy) | 64.5 ms | 105.1 ms | 148.7 ms | **2.8 ms** |
 
-**Server-side p95 is 2.5 ms** — FAISS over 9,958 items, feature assembly for 200
-candidates, one batched ranker forward pass. The remaining ~70 ms is network
-round trip.
+**Server-side p95 is 2.5–2.8 ms across runs** — FAISS over 9,958 items, feature
+assembly for 200 candidates, one batched ranker forward pass. Everything else is
+network round trip.
+
+The two runs disagree by 40% end-to-end while agreeing to 0.3 ms server-side.
+That is the same lesson twice: what a client waits for here is network, and it
+varies session to session; what the system does is stable and small. Reporting
+one run's end-to-end figure as *the* latency would be picking a number out of a
+distribution nobody controls.
 
 That gap is why the warm phase is *slower* despite a 98% cache hit rate: at 2.5 ms
 of compute against ~70 ms of round trip, the cache optimises 3% of the request and
