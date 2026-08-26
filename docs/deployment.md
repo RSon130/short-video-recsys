@@ -34,13 +34,31 @@ Quote the **cold** numbers. The warm figures measure the cache, not the model.
 
 | requirement | notes |
 |---|---|
-| `gcloud` CLI | https://cloud.google.com/sdk/docs/install — then `gcloud init` |
+| `gcloud` CLI | `winget install --id Google.CloudSDK` on Windows. Installed on Windows rather than WSL deliberately: `gcloud auth configure-docker` writes a credential helper into the Docker config the *Windows* docker CLI reads, and a WSL gcloud paired with Docker Desktop mismatches on Artifact Registry pushes. |
 | Google account + project | `gcloud projects create <ID>` or use an existing one |
 | **Billing enabled** | Required even inside the free tier. Cloud Run will not deploy without it. |
 | Docker | already in use here |
 
 Cloud Run's free tier (2M requests, 180k vCPU-seconds, 360k GiB-seconds per
 month) comfortably covers a portfolio demo at `--min-instances 0`.
+
+### Windows / Git Bash note
+
+The Cloud SDK ships its own Python. In Git Bash, `gcloud` otherwise picks up
+whatever `python` is first on PATH — a Windows Store Python 3.9 here — and
+refuses to run: *"no longer supported by gcloud"*. `scripts/deploy_cloudrun.sh`
+detects the bundled interpreter automatically. To run gcloud by hand in the
+same shell:
+
+```bash
+export PATH="$PATH:/c/Users/$USERNAME/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin"
+```
+
+```bash
+export CLOUDSDK_PYTHON="$(cygpath -w "/c/Users/$USERNAME/AppData/Local/Google/Cloud SDK/google-cloud-sdk/platform/bundledpython/python.exe")"
+```
+
+PowerShell needs neither — the installer wires both up there.
 
 ## Deploy
 
