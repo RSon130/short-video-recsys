@@ -5,7 +5,7 @@ baked into the image, so the service has no runtime dependency on object storage
 or credentials. `docker run` is the whole contract, which is what makes it
 portable across Cloud Run, App Runner, Fly, or a plain VM.
 
-## Measured locally
+## Measured locally (for comparison)
 
 Deploy image (`--target deploy`), 1,000 requests, concurrency 1, on an 8-core
 laptop. Cold and warm are reported separately because reporting them together
@@ -29,6 +29,46 @@ Quote the **cold** numbers. The warm figures measure the cache, not the model.
 > initialisation inside torch and FAISS. It is why p95 rather than max is the
 > number worth reporting, and why a single-request measurement is worthless in
 > either direction.
+
+## Measured on Cloud Run (live)
+
+`us-central1`, 1 vCPU / 2Gi, `min-instances 0`, 500 requests at concurrency 4,
+driven from a laptop in the Bay Area.
+
+| | p50 | p95 | p99 |
+|---|---|---|---|
+| **cold** — distinct users, every request a cache miss | 62.0 ms | **74.6 ms** | 117.2 ms |
+| warm — 10 users reused, ~98% cache hits | 71.3 ms | 82.2 ms | 106.9 ms |
+
+**Server-side p95: 2.5 ms.** That is the model path — FAISS over 9,958 items,
+feature assembly for 200 candidates, one batched ranker forward pass — and it is
+the number that describes the system. Everything else is network.
+
+### The warm phase is *slower*, and that is the finding
+
+Cache hits made no difference: ~98% of warm requests were served from cache, and
+end-to-end latency got marginally worse. Both facts have the same cause — at
+2.5 ms of server compute against ~70 ms of round trip, **the cache is optimising
+3% of the request**. The warm run simply landed on slightly different network
+conditions, and that noise is larger than the entire thing the cache saves.
+
+This is worth stating plainly rather than hiding, because it inverts the obvious
+conclusion. The TTL cache is not useless — it protects CPU under concurrency and
+would matter on a hot key — but as a *latency* optimisation for a remote client
+it is invisible. If the goal were a faster feed, the money is in edge proximity
+or regional deployment, not in caching. Measuring is what distinguishes those.
+
+### Which number to quote
+
+Both are honest, and they answer different questions:
+
+- **2.5 ms server-side** — how fast the recommender is.
+- **74.6 ms end-to-end** — what a client in the same country actually waits,
+  network included.
+
+Quoting 74.6 ms as "model latency" would understate the system; quoting 2.5 ms
+as "user-perceived latency" would overstate it. Local numbers (cold p95 4.7 ms)
+are not comparable to either — a dedicated laptop core with no network.
 
 ## What you need before deploying
 

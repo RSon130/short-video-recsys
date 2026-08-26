@@ -249,20 +249,26 @@ docs/            system_design.md, engineering_log.md, progress.md, learning_gui
 
 ## Serving latency
 
-Deploy image, 1,000 requests, concurrency 1, local (8-core laptop). Cold and warm
-are separated because quoting them together overstates performance by the cache
-hit rate.
+Deployed on **GCP Cloud Run** (`us-central1`, 1 vCPU / 2Gi, scale-to-zero).
+500 requests at concurrency 4, driven from a laptop; cold and warm reported
+separately.
 
 | | p50 | p95 | p99 |
 |---|---|---|---|
-| **cold** — every request misses the cache | 3.8 ms | **4.7 ms** | 5.1 ms |
-| warm — ~99% cache hits | 2.0 ms | 2.8 ms | 3.1 ms |
+| **cold** — every request a cache miss | 62.0 ms | **74.6 ms** | 117.2 ms |
+| warm — ~98% cache hits | 71.3 ms | 82.2 ms | 106.9 ms |
 
-Server-side cold p95 is **1.6 ms**: FAISS query over 9,958 items, feature
-assembly for 200 candidates, one batched ranker forward pass. Cold start is
-**2.0 s** from container start to healthy.
+**Server-side p95 is 2.5 ms** — FAISS over 9,958 items, feature assembly for 200
+candidates, one batched ranker forward pass. The remaining ~70 ms is network
+round trip.
 
-Cloud Run deployment is scripted (`scripts/deploy_cloudrun.sh`) — see
+That gap is why the warm phase is *slower* despite a 98% cache hit rate: at 2.5 ms
+of compute against ~70 ms of round trip, the cache optimises 3% of the request and
+ordinary network variance swamps it. The TTL cache still protects CPU under
+concurrency, but as a latency optimisation for a remote client it is invisible.
+
+Locally on a dedicated core the same image serves cold p95 **4.7 ms** (server-side
+1.6 ms), cold start **2.0 s**. Deployment is scripted — see
 [docs/deployment.md](docs/deployment.md).
 
 ## Stack
