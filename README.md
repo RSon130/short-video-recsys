@@ -46,18 +46,45 @@ the system depends on catalogue size and density.**
 
 ### `big_matrix` — 12.5M interactions, 6,873 test users
 
-| system | recall@5 | recall@10 | ndcg@10 | recall@20 | watch-AUC |
-|---|---|---|---|---|---|
-| popularity baseline | 0.0052 | 0.0055 | 0.0052 | 0.0061 | — |
-| retrieval only | **0.0191** | 0.0131 | 0.0130 | **0.0134** | 0.482 |
-| full pipeline — ranker on MSE | 0.0031 | 0.0070 | 0.0055 | 0.0093 | **0.714** |
-| **full pipeline — ranker on pairwise loss** | 0.0112 | **0.0141** | **0.0131** | 0.0099 | 0.622 |
+| system | recall@5 | recall@10 | ndcg@10 | recall@20 |
+|---|---|---|---|---|
+| popularity baseline | 0.0052 | 0.0055 | 0.0052 | 0.0061 |
+| retrieval only | **0.0191** | 0.0131 | 0.0130 | 0.0134 |
+| **full pipeline** | 0.0150 | **0.0149** | **0.0133** | 0.0112 |
 
-The full pipeline beats popularity at every cutoff — **+115% recall@5, +155%
-recall@10, +152% ndcg@10**. Retrieval alone beats it by **+266% recall@5**. At a
-1.1% relevance base rate a non-personalised list stops working, and narrowing
-8,771 candidates to 200 has real value — the opposite of `small_matrix`, where a
-25% base rate made popularity unbeatable.
+Every comparison is a **paired bootstrap** on the same users, with a 95%
+confidence interval — see [Experiment statistics](#experiment-statistics).
+
+| comparison | lift | 95% CI | |
+|---|---|---|---|
+| retrieval vs popularity | +136.2% | [+0.0065, +0.0086] | significant |
+| full pipeline vs popularity | **+169.9%** | [+0.0084, +0.0104] | significant |
+| full pipeline vs retrieval only | **+14.3%** | [+0.0007, +0.0030] | significant |
+
+At a 1.1% relevance base rate a non-personalised list stops working, and
+narrowing 8,771 candidates to 200 has real value — the opposite of
+`small_matrix`, where a 25% base rate made popularity unbeatable. Retrieval
+still leads at K=5: the ranker only ever sees the shortlist it is handed.
+
+## Experiment statistics
+
+Comparisons are **paired** — every system scored on identical users, then
+differenced per user. A live A/B test splits traffic because it must (one person
+cannot be shown two feeds at once) and pays for it with between-group variance.
+Offline that constraint does not exist, so copying the split would discard half
+the data per model for nothing. Pairing also removes between-user variance,
+which here dwarfs the effects being measured: the +14.3% two-stage lift is
+detectable *because* it is paired.
+
+The harness also reports a sample-ratio check on the hash bucketing (0.504 vs
+0.500 expected, z=+0.69) and a power calculation. That last one is sobering: at
+3,436 users per arm the smallest detectable lift is ~21%, and detecting a 5%
+lift would need ~62,000 users per arm.
+
+This exists because of a specific failure. A 150-user sample once showed the
+pipeline beating popularity by +0.7%, and the full 1,411-user set reversed that
+to −0.9%. The sample was far below the detectable threshold — it was never a
+signal. A confidence interval says so immediately; a point estimate does not.
 
 ### The ranker's objective matters more than its architecture
 
