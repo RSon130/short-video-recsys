@@ -247,6 +247,24 @@ scripts/         download_kuairec.py, build_index.py, evaluate.py
 docs/            system_design.md, engineering_log.md, progress.md, learning_guide.md
 ```
 
+## Serving latency
+
+Deploy image, 1,000 requests, concurrency 1, local (8-core laptop). Cold and warm
+are separated because quoting them together overstates performance by the cache
+hit rate.
+
+| | p50 | p95 | p99 |
+|---|---|---|---|
+| **cold** — every request misses the cache | 3.8 ms | **4.7 ms** | 5.1 ms |
+| warm — ~99% cache hits | 2.0 ms | 2.8 ms | 3.1 ms |
+
+Server-side cold p95 is **1.6 ms**: FAISS query over 9,958 items, feature
+assembly for 200 candidates, one batched ranker forward pass. Cold start is
+**2.0 s** from container start to healthy.
+
+Cloud Run deployment is scripted (`scripts/deploy_cloudrun.sh`) — see
+[docs/deployment.md](docs/deployment.md).
+
 ## Stack
 
 PyTorch · FAISS · FastAPI · Docker · pandas/NumPy · pytest (157 tests)

@@ -4,9 +4,17 @@ __pycache__
 *.pyc
 *.pyo
 .pytest_cache
-datastore/raw/
-datastore/processed/
+logs/
+checkpoints/
 .env
 *.egg-info
-checkpoints/
-logs/
+
+# Raw CSVs (~1.5 GB) and the interaction parquets are training inputs only.
+datastore/raw/
+datastore/processed/interactions/
+datastore/processed_small/
+datastore/processed/evaluation_results.json
+
+# The remaining artifacts in datastore/processed/ — embeddings, FAISS index,
+# ranker weights, id maps, feature tables — total ~10 MB and are deliberately
+# NOT excluded: the deploy stage bakes them into the image. See Dockerfile.cpu.

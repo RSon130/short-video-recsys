@@ -164,10 +164,15 @@ async def recommend(request: RecommendRequest) -> RecommendResponse:
 
     cached = _get_cache(request.user_id)
     if cached is not None:
+        # Refresh latency_ms rather than replaying the value stored when the
+        # entry was computed. A cached response otherwise reports the cost of
+        # the original miss — a load test reads that back as a ~36 ms cache hit
+        # that actually took ~1 ms, which is the wrong number in the wrong
+        # direction.
         latency_ms = (time.perf_counter() - t0) * 1000
         logger.info("user=%d top_k=%d cache_hit=True latency_ms=%.1f",
                     request.user_id, request.top_k, latency_ms)
-        return cached
+        return cached.model_copy(update={"latency_ms": latency_ms})
 
     internal_uid = _id_maps["user_id_map"].get(request.user_id)
     if internal_uid is None:
