@@ -11,6 +11,26 @@
 #   REGION=europe-west1 ./scripts/deploy_cloudrun.sh
 set -euo pipefail
 
+# The Cloud SDK ships its own Python. On Windows/Git Bash, gcloud otherwise
+# picks up whatever python is first on PATH — here a Windows Store Python 3.9,
+# which current gcloud refuses to run on ("no longer supported by gcloud").
+# Point at the bundled interpreter when one exists and CLOUDSDK_PYTHON is unset.
+if [[ -z "${CLOUDSDK_PYTHON:-}" ]]; then
+  for candidate in     "${LOCALAPPDATA:-$HOME/AppData/Local}/Google/Cloud SDK/google-cloud-sdk/platform/bundledpython/python.exe"     "/c/Users/${USER:-$USERNAME}/AppData/Local/Google/Cloud SDK/google-cloud-sdk/platform/bundledpython/python.exe"
+  do
+    if [[ -x "${candidate}" ]]; then
+      export CLOUDSDK_PYTHON="$(cygpath -w "${candidate}" 2>/dev/null || echo "${candidate}")"
+      break
+    fi
+  done
+fi
+
+command -v gcloud >/dev/null || {
+  echo "gcloud not on PATH. Add it, e.g.:" >&2
+  echo "  export PATH=\"\$PATH:/c/Users/\$USERNAME/AppData/Local/Google/Cloud SDK/google-cloud-sdk/bin\"" >&2
+  exit 1
+}
+
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${REGION:-us-central1}"
 SERVICE="${SERVICE:-short-video-recsys}"
