@@ -1,103 +1,172 @@
 """
-Deterministic user-level A/B group assignment and metric comparison.
+Experiment statistics for comparing two ranking systems.
 
-Simulates an A/B test by splitting users into two groups and comparing
-a per-group metric (watch-time AUC) between two model variants.
+What changed and why
+--------------------
+The first version imitated a live A/B test: split users by a hash, score group A
+with model A and group B with model B, compare the pooled metric. That mirrors
+the *mechanics* of an online experiment but inherits its central limitation for
+no reason.
+
+A live A/B test splits traffic because it has to — the same person cannot be
+shown two different feeds at the same moment, so the counterfactual is
+unobservable, and you pay for it with between-group population variance.
+Offline, that constraint does not exist: every model can be scored on every
+user. Copying the split therefore discards half the data per model and *adds*
+noise while answering a strictly weaker question.
+
+So this module does the thing offline evaluation can do and online cannot:
+a **paired** comparison on identical users, with a confidence interval.
+
+Three capabilities:
+
+  paired_bootstrap            is the difference real, or sampling noise?
+  minimum_detectable_effect   how much traffic would a live test need?
+  assign_group /              deterministic bucketing for real traffic splits,
+  check_sample_ratio          plus the sample-ratio check that validates it
+
+The motivating incident is in docs/engineering_log.md: a 150-user sample showed
+the pipeline beating popularity by +0.7% at recall@20, and the full 1,411-user
+set reversed that to -0.9%. A confidence interval would have flagged it
+immediately instead of it being caught by chance on a re-run.
 """
 import hashlib
 
 import numpy as np
-import pandas as pd
-
-from evaluation.metrics import watch_time_auc
-from data.schema import Cols
 
 
 def assign_group(user_id: int, traffic_split: float = 0.5, seed: int = 42) -> str:
     """
     Deterministically assign a user to group 'A' or 'B'.
 
-    Uses an MD5 hash of (seed + user_id) modulo 1000 to produce a stable,
-    pseudo-random assignment.  The same user always gets the same group for
-    a given seed — this is essential for consistency across service restarts
-    and for reproducible experiment replay.
+    MD5 of (seed + user_id) mod 1000 — used as a fast uniform hash, not for
+    security. Deterministic assignment is what makes an experiment replayable:
+    the same user lands in the same bucket across restarts and redeploys, so
+    nobody flips variants mid-experiment.
 
-    Why MD5 here?
-        We're using it as a fast, uniform hash function for bucketing —
-        not for any security purpose.  The output distribution is uniform
-        enough to guarantee approximately `traffic_split * 100`% of users
-        land in group A.
-
-    Args:
-        user_id:       The user's original (raw) ID.
-        traffic_split: Fraction of users assigned to group A, e.g. 0.5.
-        seed:          Experiment seed — change to run a new independent test.
-
-    Returns:
-        'A' or 'B'.
+    This is the function a serving layer calls to route real traffic.
     """
     h = int(hashlib.md5(f"{seed}{user_id}".encode()).hexdigest(), 16)
     return "A" if (h % 1000) < int(traffic_split * 1000) else "B"
 
 
-def run_ab_test(
-    interactions: pd.DataFrame,
-    model_a_scores: np.ndarray,
-    model_b_scores: np.ndarray,
-    cfg: dict,
-) -> dict:
+def check_sample_ratio(user_ids, traffic_split: float = 0.5, seed: int = 42) -> dict:
     """
-    Run a simulated A/B test and report per-group watch-time AUC.
+    Sample-ratio mismatch check on the bucketing.
 
-    Users are split by assign_group() into group A (evaluated with
-    model_a_scores) and group B (evaluated with model_b_scores).  The
-    row masks on `interactions` ensure each group only evaluates the
-    scores for their own users' interactions.
+    The first thing a real experimentation platform verifies: did the split land
+    where it was supposed to? A skew usually means the assignment logic is
+    broken — a bad hash, a filter applied after bucketing, one variant erroring
+    out — and every downstream number is then untrustworthy.
 
-    Typical use case:
-        model_a_scores = two-tower cosine similarity scores (retrieval only)
-        model_b_scores = MLP ranker predicted watch_ratio
-        → compare whether adding a ranker improves AUC over retrieval alone.
-
-    Args:
-        interactions:    Interaction DataFrame with user_id and watch_ratio columns.
-        model_a_scores:  Score array aligned row-for-row with `interactions`.
-        model_b_scores:  Score array aligned row-for-row with `interactions`.
-        cfg:             Config dict; reads evaluation.ab_test_traffic_split
-                         and project.seed.
-
-    Returns:
-        Dict with keys 'group_A' and 'group_B', each containing:
-            'n_users':        int — number of unique users in the group.
-            'watch_time_auc': float — mean AUC for that group.
+    Returns observed counts and a z score; |z| > 3 is the conventional alarm.
     """
-    traffic_split = cfg["evaluation"]["ab_test_traffic_split"]
-    seed = cfg["project"]["seed"]
-
-    group_users_a: set = set()
-    group_users_b: set = set()
-    for uid in interactions[Cols.USER_ID].unique():
-        group = assign_group(int(uid), traffic_split, seed)
-        if group == "A":
-            group_users_a.add(int(uid))
-        else:
-            group_users_b.add(int(uid))
-
-    mask_a = interactions[Cols.USER_ID].isin(group_users_a)
-    y_true_a = interactions.loc[mask_a, Cols.WATCH_RATIO].values
-    y_score_a = model_a_scores[mask_a.values]
-
-    mask_b = interactions[Cols.USER_ID].isin(group_users_b)
-    y_true_b = interactions.loc[mask_b, Cols.WATCH_RATIO].values
-    y_score_b = model_b_scores[mask_b.values]
+    groups = [assign_group(int(u), traffic_split, seed) for u in user_ids]
+    n_a = sum(1 for g in groups if g == "A")
+    n = len(groups)
+    expected_a = n * traffic_split
+    sd = np.sqrt(n * traffic_split * (1 - traffic_split))
+    z = (n_a - expected_a) / sd if sd > 0 else 0.0
 
     return {
-        "group_A": {
-            "n_users": len(group_users_a),
-            "watch_time_auc": watch_time_auc(y_true_a, y_score_a),
-        },
-        "group_B": {
-            "n_users": len(group_users_b),
-            "watch_time_auc": watch_time_auc(y_true_b, y_score_b),
-        },
+        "n": n,
+        "n_a": n_a,
+        "n_b": n - n_a,
+        "observed_split": n_a / n if n else float("nan"),
+        "expected_split": traffic_split,
+        "z": float(z),
+        "srm_suspected": bool(abs(z) > 3),
+    }
+
+
+def paired_bootstrap(a, b, n_boot: int = 10_000, confidence: float = 0.95,
+                     seed: int = 42) -> dict:
+    """
+    Bootstrap confidence interval for the per-user difference b - a.
+
+    Pairing matters here. Users differ enormously in how easy they are to
+    recommend for, and that between-user variance dwarfs the effect being
+    measured. Comparing group means throws that structure away; differencing
+    within each user removes it, so this detects effects an unpaired test would
+    miss at the same sample size.
+
+    Args:
+        a, b:       per-user metric values for the two systems — same users,
+                    same order.
+        n_boot:     resamples.
+        confidence: interval width, e.g. 0.95.
+
+    Returns:
+        mean difference, CI bounds, relative lift, and whether the CI excludes 0.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.shape != b.shape:
+        raise ValueError(
+            f"paired comparison needs equal shapes, got {a.shape} and {b.shape}"
+        )
+    if len(a) == 0:
+        raise ValueError("no observations to compare")
+
+    diff = b - a
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(diff), size=(n_boot, len(diff)))
+    boot_means = diff[idx].mean(axis=1)
+
+    alpha = 1 - confidence
+    lo, hi = np.quantile(boot_means, [alpha / 2, 1 - alpha / 2])
+    base = a.mean()
+
+    return {
+        "n_users": len(diff),
+        "mean_a": float(base),
+        "mean_b": float(b.mean()),
+        "mean_diff": float(diff.mean()),
+        "ci_low": float(lo),
+        "ci_high": float(hi),
+        "relative_lift": float(diff.mean() / base) if base else float("nan"),
+        "significant": bool(lo > 0 or hi < 0),
+        "confidence": confidence,
+    }
+
+
+def minimum_detectable_effect(values, n_users: int = None, power: float = 0.8,
+                              alpha: float = 0.05) -> dict:
+    """
+    Smallest effect a live experiment could detect, given observed variance.
+
+    Answers the question that precedes shipping any model: how much traffic does
+    this need? Normal approximation for a two-sample comparison, with
+    z(1-alpha/2) + z(power) = 1.96 + 0.84 = 2.80 at the conventional settings.
+
+    Args:
+        values:  per-user metric values, used for their standard deviation.
+        n_users: users available per arm; defaults to len(values) split in two.
+
+    Returns:
+        Absolute and relative MDE, plus users-per-arm needed for a 5% and a 10%
+        relative lift.
+    """
+    values = np.asarray(values, dtype=float)
+    mean = values.mean()
+    sd = values.std(ddof=1)
+    per_arm = n_users if n_users else len(values) // 2
+
+    z_sum = 2.80  # 1.96 (alpha=0.05, two-sided) + 0.84 (power=0.8)
+    mde_abs = z_sum * sd * np.sqrt(2.0 / per_arm) if per_arm else float("nan")
+
+    def users_for(relative):
+        target = relative * mean
+        return int(np.ceil(2 * (z_sum * sd / target) ** 2)) if target else -1
+
+    return {
+        "mean": float(mean),
+        "sd": float(sd),
+        "users_per_arm": int(per_arm),
+        "mde_absolute": float(mde_abs),
+        "mde_relative": float(mde_abs / mean) if mean else float("nan"),
+        "users_for_5pct_lift": users_for(0.05),
+        "users_for_10pct_lift": users_for(0.10),
+        "power": power,
+        "alpha": alpha,
     }

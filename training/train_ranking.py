@@ -12,8 +12,10 @@ Usage:
     python training/train_ranking.py --config config/kuairec.yaml
 """
 import argparse
+import json
 import pickle
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -264,6 +266,79 @@ def get_device(cfg):
     return torch.device(device_cfg)
 
 
+class ValidationProbe:
+    """
+    Measures recall@K on held-out users, so checkpoints are chosen on the metric
+    the system is judged by rather than on the training loss.
+
+    Why this exists: two pairwise runs of identical config produced validation
+    losses of 0.2718 and 0.2708 — essentially the same — yet recall@10 of 0.0141
+    and 0.0102, a 38% gap. The loss and the metric were not moving together, so
+    selecting the "best" epoch by loss was close to arbitrary with respect to
+    ranking quality, and two runs of the same code disagreed by more than the
+    effects being compared between objectives.
+
+    Candidates are fixed. Retrieval does not change while the ranker trains, so
+    the shortlist per user and its feature matrix are built once up front and
+    only re-scored each epoch. That makes the probe cheap enough to run every
+    epoch: a few hundred users x top_k_recall rows through the MLP.
+    """
+    def __init__(self, cfg, user_embs, item_embs, features, train_df, val_df,
+                 n_users=300):
+        from retrieval.faiss_index import load_index, query_index
+
+        threshold = cfg["features"]["positive_watch_ratio"]
+        top_k_recall = cfg["retrieval"]["top_k_recall"]
+        rng = np.random.default_rng(cfg["project"]["seed"])
+
+        relevant = val_df.loc[val_df[Cols.WATCH_RATIO] >= threshold]
+        ground_truth = {
+            int(uid): set(group[Cols.ITEM_ID].tolist())
+            for uid, group in relevant.groupby(Cols.USER_ID)
+        }
+        candidates_pool = sorted(ground_truth.keys())
+        if len(candidates_pool) > n_users:
+            picked = rng.choice(len(candidates_pool), n_users, replace=False)
+            candidates_pool = [candidates_pool[i] for i in sorted(picked)]
+
+        seen = train_df.groupby(Cols.USER_ID)[Cols.ITEM_ID].apply(set).to_dict()
+        index = load_index(cfg["retrieval"]["index_path"])
+        n_items = len(item_embs)
+
+        rows, self.slices, self.truth = [], [], []
+        offset = 0
+        for uid in candidates_pool:
+            u_emb = user_embs[uid]
+            _, all_candidates = query_index(index, u_emb, top_k=n_items)
+            excluded = seen.get(uid, set())
+            kept = [int(i) for i in all_candidates
+                    if int(i) not in excluded][:top_k_recall]
+            if not kept:
+                continue
+            rows.append(features.build_batch(u_emb, item_embs, uid, kept))
+            self.slices.append((offset, offset + len(kept), np.array(kept)))
+            self.truth.append(ground_truth[uid])
+            offset += len(kept)
+
+        self.x = torch.from_numpy(np.concatenate(rows)) if rows else None
+        self.n_users = len(self.truth)
+
+    def recall_at_k(self, model, device, k=10):
+        """Mean recall@k over the probe users under the current model."""
+        if self.x is None:
+            return float("nan")
+        model.eval()
+        with torch.no_grad():
+            scores = model(self.x.to(device)).squeeze(1).cpu().numpy()
+
+        total = 0.0
+        for (start, end, item_ids), relevant in zip(self.slices, self.truth):
+            order = np.argsort(-scores[start:end])[:k]
+            hits = len(set(item_ids[order].tolist()) & relevant)
+            total += hits / min(k, len(relevant))
+        return total / len(self.truth) if self.truth else float("nan")
+
+
 def train(cfg):
     """
     Full MLP ranker training loop.
@@ -319,6 +394,15 @@ def train(cfg):
     print(f"Ranker training rows: {len(dataset):,} | validation rows: {len(val_dataset):,}")
 
     device = get_device(cfg)
+
+    # Seed weight initialisation and dropout. Without this, two runs of the same
+    # config differ by more than the effects being measured: a pairwise retrain
+    # produced recall@10 0.0102 against an earlier 0.0141 with a *better*
+    # validation loss. Reproducibility is a precondition for any comparison
+    # between objectives meaning anything.
+    torch.manual_seed(cfg["project"]["seed"])
+    np.random.seed(cfg["project"]["seed"])
+
     model = build_ranker(cfg, dataset.user_dense_dim, dataset.item_dense_dim).to(device)
 
     optimizer = torch.optim.Adam(
@@ -359,6 +443,10 @@ def train(cfg):
                 total += loss.item()
         return total / len(data_loader)
 
+    probe = ValidationProbe(cfg, user_embs, item_embs, features, train_df, val_df)
+    print(f"Validation probe: {probe.n_users} users, selecting on recall@10")
+
+    best_recall = -1.0
     best_val = float("inf")
     best_state = None
     best_epoch = 0
@@ -368,10 +456,14 @@ def train(cfg):
         t0 = time.time()
         train_loss = run_epoch(loader, True)
         val_loss = run_epoch(val_loader, False)
+        val_recall = probe.recall_at_k(model, device, k=10)
         elapsed = time.time() - t0
 
+        # Select on recall@10, not on the loss. They do not move together: two
+        # runs with near-identical loss differed by 38% in recall@10.
         marker = ""
-        if val_loss < best_val:
+        if val_recall > best_recall:
+            best_recall = val_recall
             best_val = val_loss
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             best_epoch = epoch
@@ -381,20 +473,42 @@ def train(cfg):
             epochs_without_improvement += 1
 
         print(f"Epoch {epoch}/{epochs} — train {objective}: {train_loss:.6f} — "
-              f"val {objective}: {val_loss:.6f} — {elapsed:.1f}s{marker}")
+              f"val {objective}: {val_loss:.6f} — val recall@10: {val_recall:.5f} — "
+              f"{elapsed:.1f}s{marker}")
 
         if epochs_without_improvement >= patience:
             print(f"Early stopping: no validation improvement in {patience} epochs.")
             break
 
     model.load_state_dict(best_state)
-    print(f"Restored best ranker from epoch {best_epoch} (val {best_val:.6f})")
+    print(f"Restored best ranker from epoch {best_epoch} "
+          f"(val recall@10 {best_recall:.5f}, val {objective} {best_val:.6f})")
 
     torch.save(model.state_dict(), "datastore/processed/ranker_model.pt")
 
+    # Provenance. Nothing previously recorded which objective produced an
+    # artifact, and checkpoints were named by epoch alone — so a listwise model
+    # sat in ranker_model.pt while config said pairwise, and that mismatch rode
+    # all the way into a Cloud Run deployment before an evaluation caught it.
+    # Consumers compare this against config and warn on drift.
+    meta = {
+        "objective": objective,
+        "best_epoch": best_epoch,
+        "best_val_loss": float(best_val),
+        "best_val_recall_at_10": float(best_recall),
+        "selected_on": "val_recall@10",
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "n_train_rows": len(dataset),
+        "interaction_file": cfg["data"]["kuairec"]["interaction_file"],
+    }
+    with open("datastore/processed/ranker_meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"Wrote ranker_meta.json: {meta}")
+
     ckpt_dir = Path(cfg["training"]["ranking"]["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), ckpt_dir / f"ranker_best_epoch_{best_epoch}.pt")
+    torch.save(model.state_dict(),
+               ckpt_dir / f"ranker_{objective}_epoch_{best_epoch}.pt")
 
 
 if __name__ == "__main__":

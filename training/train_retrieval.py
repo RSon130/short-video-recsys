@@ -285,6 +285,8 @@ def train(cfg):
           f"{'enabled' if features.enabled else 'disabled (ID-only towers)'}")
 
     device = get_device(cfg)
+    torch.manual_seed(cfg["project"]["seed"])
+    np.random.seed(cfg["project"]["seed"])
     model = build_model(
         cfg, n_users, n_items,
         user_dense_dim=features.user_dense_dim,

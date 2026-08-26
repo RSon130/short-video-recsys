@@ -111,3 +111,26 @@ def evaluate_at_k_values(recommended_lists: list, ground_truth_lists: list, k_va
         results[f"recall@{k}"] = float(np.mean(recalls))
         results[f"ndcg@{k}"] = float(np.mean(ndcgs))
     return results
+
+
+def per_user_metric(recommended_lists: list, ground_truth_lists: list,
+                    k: int, metric: str = "recall") -> "np.ndarray":
+    """
+    Per-user metric values, unaggregated.
+
+    evaluate_at_k_values() returns the mean, which is what goes in a results
+    table. Significance testing needs the underlying distribution: the paired
+    bootstrap in evaluation/ab_test.py differences these user by user, and the
+    power calculation needs their standard deviation.
+
+    Args:
+        recommended_lists:  per-user recommended item lists.
+        ground_truth_lists: per-user relevant item lists, same order.
+        k:                  cutoff.
+        metric:             "recall" or "ndcg".
+
+    Returns:
+        Array of per-user scores, aligned with the input order.
+    """
+    fn = {"recall": recall_at_k, "ndcg": ndcg_at_k}[metric]
+    return np.array([fn(r, g, k) for r, g in zip(recommended_lists, ground_truth_lists)])

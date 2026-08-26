@@ -31,7 +31,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config_loader import load_config
 from data.schema import Cols
 from evaluation.baselines import popularity_ranking, popularity_recommendations
-from evaluation.metrics import evaluate_at_k_values, watch_time_auc
+from evaluation.ab_test import (check_sample_ratio,
+                                minimum_detectable_effect, paired_bootstrap)
+from evaluation.metrics import (evaluate_at_k_values, per_user_metric,
+                                watch_time_auc)
 from features.dense_features import DenseFeatureStore
 from models.ranker import build_ranker
 from retrieval.faiss_index import load_index, query_index
@@ -63,6 +66,31 @@ def build_ground_truth(test_df: pd.DataFrame, positive_threshold: float) -> dict
     }
 
 
+def _warn_on_artifact_drift(cfg) -> None:
+    """
+    Check the ranker on disk was trained with the objective config asks for.
+
+    A listwise model once sat in ranker_model.pt while config said pairwise, and
+    the mismatch survived into a deployment. Metrics looked plausible either
+    way, which is exactly why it needed an explicit check rather than vigilance.
+    """
+    meta_path = PROCESSED / "ranker_meta.json"
+    if not meta_path.exists():
+        print("WARNING: no ranker_meta.json — cannot verify which objective "
+              "trained this artifact. Retrain to record provenance.")
+        return
+    meta = json.loads(meta_path.read_text())
+    configured = cfg["ranking"]["objective"]
+    if meta.get("objective") != configured:
+        raise SystemExit(
+            f"Artifact drift: ranker_model.pt was trained with "
+            f"'{meta.get('objective')}' but config asks for '{configured}'. "
+            f"Retrain, or set ranking.objective to '{meta.get('objective')}'."
+        )
+    print(f"Ranker artifact: {meta['objective']}, epoch {meta['best_epoch']}, "
+          f"val {meta['best_val_loss']:.6f}, trained {meta['trained_at']}")
+
+
 def score_systems(cfg, users, ground_truth, top_k_final):
     """
     Generate per-user recommendation lists for all three systems.
@@ -85,6 +113,7 @@ def score_systems(cfg, users, ground_truth, top_k_final):
         torch.load(PROCESSED / "ranker_model.pt", map_location="cpu", weights_only=True)
     )
     ranker.eval()
+    _warn_on_artifact_drift(cfg)
 
     train_df = pd.read_parquet(PROCESSED / "interactions" / "train.parquet")
     ranking = popularity_ranking(train_df, positive_threshold)
@@ -226,9 +255,51 @@ def main():
         for name, value in auc.items():
             print(f"  {name}: {value:.4f}")
 
+    # ------------------------------------------------------------------
+    # Significance: is the gap between systems real, or sampling noise?
+    # ------------------------------------------------------------------
+    ab_k = 10 if 10 in k_values else max(k_values)
+    per_user = {
+        system: per_user_metric(recs, gt_lists, ab_k, "recall")
+        for system, recs in recommendations.items()
+    }
+
+    print(f"\n=== Paired comparison at recall@{ab_k} "
+          f"(same users, {len(users):,} of them) ===")
+    comparisons = {}
+    pairs = [("popularity", "retrieval-only"),
+             ("popularity", "full pipeline"),
+             ("retrieval-only", "full pipeline")]
+    for base_name, test_name in pairs:
+        if base_name not in per_user or test_name not in per_user:
+            continue
+        result = paired_bootstrap(per_user[base_name], per_user[test_name])
+        comparisons[f"{test_name} vs {base_name}"] = result
+        verdict = "significant" if result["significant"] else "NOT significant"
+        print(f"  {test_name:<15} vs {base_name:<15} "
+              f"{result['relative_lift']:+7.1%}  "
+              f"95% CI [{result['ci_low']:+.5f}, {result['ci_high']:+.5f}]  "
+              f"{verdict}")
+
+    srm = check_sample_ratio(users, cfg["evaluation"]["ab_test_traffic_split"],
+                             cfg["project"]["seed"])
+    print(f"\nSample-ratio check on the hash split: "
+          f"{srm['observed_split']:.3f} vs {srm['expected_split']:.3f} expected, "
+          f"z={srm['z']:+.2f}"
+          f"{' — SRM SUSPECTED' if srm['srm_suspected'] else ' — ok'}")
+
+    power = minimum_detectable_effect(per_user["full pipeline"])
+    print(f"\nPower, if this were a live experiment "
+          f"({power['users_per_arm']:,} users/arm at 80% power):")
+    print(f"  smallest detectable lift  {power['mde_relative']:.1%}")
+    print(f"  users/arm for a 5% lift   {power['users_for_5pct_lift']:,}")
+    print(f"  users/arm for a 10% lift  {power['users_for_10pct_lift']:,}")
+
     out = PROCESSED / "evaluation_results.json"
     out.write_text(json.dumps(
-        {"metrics": results, "watch_time_auc": auc, "n_users": len(users)}, indent=2
+        {"metrics": results, "watch_time_auc": auc, "n_users": len(users),
+         "paired_comparisons": comparisons, "sample_ratio_check": srm,
+         "power": power}, indent=2
     ))
     print(f"\nWrote {out}")
     return results
