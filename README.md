@@ -97,6 +97,14 @@ All three objectives are implemented and selectable via `ranking.objective`:
 | **pairwise — BPR** | **0.0112** | **0.0141** | 0.0099 | 0.622 |
 | listwise — sampled softmax | 0.0081 | 0.0099 | **0.0100** | 0.609 |
 
+> **These three rows were produced under loss-based checkpoint selection**, which
+> was later found unsound (see below) — the same pairwise config re-run gave
+> recall@10 anywhere from 0.0102 to 0.0149 depending on which epoch was picked.
+> The *ordering* here held up and is why pairwise is the default, but treat the
+> absolute values as superseded by the headline table above (recall@10 0.0149,
+> selected on validation recall). Re-running all three under metric-based
+> selection is open work.
+
 MSE optimises *calibration* — how much of a video someone will watch — and it
 wins on watch-time AUC, which is exactly the metric that rewards calibration.
 But recall@K rewards *ordering*, and a regression head minimising squared error
