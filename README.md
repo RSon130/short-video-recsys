@@ -280,25 +280,33 @@ Deployed on **GCP Cloud Run** (`us-central1`, 1 vCPU / 2Gi, scale-to-zero).
 500 requests at concurrency 4, driven from a laptop; cold and warm reported
 separately.
 
-| | p50 | p95 | p99 | server-side p95 |
-|---|---|---|---|---|
-| run 1 (500 req) | 62.0 ms | 74.6 ms | 117.2 ms | **2.5 ms** |
-| run 2 (500 req, after redeploy) | 64.5 ms | 105.1 ms | 148.7 ms | **2.8 ms** |
+**Measured by Cloud Run**, `run.googleapis.com/request_latencies` — the
+platform's own view, independent of any client:
 
-**Server-side p95 is 2.5–2.8 ms across runs** — FAISS over 9,958 items, feature
-assembly for 200 candidates, one batched ranker forward pass. Everything else is
-network round trip.
+| | p50 | p95 | p99 |
+|---|---|---|---|
+| **Cloud Run request latency** | **5.0 ms** | **9.6 ms** | 10.0 ms |
 
-The two runs disagree by 40% end-to-end while agreeing to 0.3 ms server-side.
-That is the same lesson twice: what a client waits for here is network, and it
-varies session to session; what the system does is stable and small. Reporting
-one run's end-to-end figure as *the* latency would be picking a number out of a
-distribution nobody controls.
+Three vantage points measure three different things, and conflating them is the
+easy mistake:
 
-That gap is why the warm phase is *slower* despite a 98% cache hit rate: at 2.5 ms
-of compute against ~70 ms of round trip, the cache optimises 3% of the request and
-ordinary network variance swamps it. The TTL cache still protects CPU under
-concurrency, but as a latency optimisation for a remote client it is invisible.
+| vantage | p95 | what it includes |
+|---|---|---|
+| app self-reported | 2.4 ms | the handler only |
+| **Cloud Run platform** | **9.6 ms** | handler + framework + container ingress |
+| client (laptop) | 75–105 ms | all of the above + internet round trip |
+
+The client figure varies 40% between sessions while the platform figure is
+stable, which is the whole finding: what a remote client waits for is dominated
+by network, and what the service does is small and consistent. **Quote 9.6 ms** —
+it is the platform's measurement of the service, not the app grading its own
+homework, and not a number that moves with whichever café wifi ran the test.
+
+That gap also explains why the TTL cache is invisible end-to-end: at ~10 ms of
+service time against ~70 ms of round trip, the cache optimises a small slice of
+what the user actually waits for. It still protects CPU under concurrency; it is
+simply not a latency win for a remote client. A faster feed would come from
+regional placement.
 
 Locally on a dedicated core the same image serves cold p95 **4.7 ms** (server-side
 1.6 ms), cold start **2.0 s**. Deployment is scripted — see

@@ -46,7 +46,23 @@ and max 332 ms — cold starts, with `min-instances 0`, while instances were sti
 spinning up. Discarded as unrepresentative of steady state and recorded here so
 the omission is visible rather than silent.
 
-**Server-side p95: 2.5 ms.** That is the model path — FAISS over 9,958 items,
+### The authoritative number: Cloud Run's own metric
+
+```bash
+gcloud services enable monitoring.googleapis.com
+```
+
+Query `run.googleapis.com/request_latencies` for the service (see the snippet at
+the end of this file), which is what the Cloud Run console displays:
+
+| | p50 | p95 | p99 |
+|---|---|---|---|
+| **Cloud Run request latency** | **5.0 ms** | **9.6 ms** | 10.0 ms |
+
+This is the number to report. It measures the service as the platform sees it —
+no client network, and not the application timing itself.
+
+**App self-reported p95: 2.4-2.8 ms.** That is the handler path — FAISS over 9,958 items,
 feature assembly for 200 candidates, one batched ranker forward pass — and it is
 the number that describes the system. Everything else is network.
 
@@ -152,3 +168,16 @@ Pyodide-based Python Workers cannot load. Cloudflare Containers could run the
 image, but the platform's value is edge proximity, and this workload is
 compute-bound rather than network-bound. Cloudflare is a reasonable choice for a
 custom domain or a static demo page in front of the service, not for hosting it.
+
+
+## Querying Cloud Run's latency metric
+
+```bash
+TOKEN=$(gcloud auth print-access-token)
+PROJECT=$(gcloud config get-value project)
+END=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+START=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+curl -s -G "https://monitoring.googleapis.com/v3/projects/$PROJECT/timeSeries"   -H "Authorization: Bearer $TOKEN"   --data-urlencode 'filter=metric.type="run.googleapis.com/request_latencies" AND resource.labels.service_name="short-video-recsys"'   --data-urlencode "interval.startTime=$START"   --data-urlencode "interval.endTime=$END"   --data-urlencode "aggregation.alignmentPeriod=300s"   --data-urlencode "aggregation.perSeriesAligner=ALIGN_PERCENTILE_95"
+```
+
+Metrics lag traffic by a few minutes, so generate load first and query after.
