@@ -405,8 +405,9 @@ def train(cfg):
 
     model = build_ranker(cfg, dataset.user_dense_dim, dataset.item_dense_dim).to(device)
 
-    optimizer = torch.optim.Adam(
-        model.parameters(),
+    from training.train_retrieval import build_optimizer
+    optimizer = build_optimizer(
+        model,
         lr=cfg["training"]["ranking"]["lr"],
         weight_decay=cfg["training"]["ranking"]["weight_decay"],
     )

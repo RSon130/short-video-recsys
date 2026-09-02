@@ -181,6 +181,62 @@ def get_device(cfg):
     return torch.device(device_cfg)
 
 
+def build_optimizer(model, lr, weight_decay):
+    """
+    Adam with weight decay applied only to matrix weights.
+
+    Why this is not the default: PyTorch applies weight_decay to *every*
+    parameter, including LayerNorm gains and biases. A LayerNorm gain that
+    decays toward zero zeroes that layer's output; the gradient path behind it
+    dies, and decay then grinds the remaining weights to zero as well. It is a
+    death spiral with no error message.
+
+    That is exactly what happened here. The user tower ended up with every
+    weight at 0.000000 except the final bias, so the tower computed
+    normalize(bias) — one constant unit vector — and all 7,176 users received an
+    identical embedding. Retrieval returned the same ranking for everybody while
+    still beating the popularity baseline, because a global item ordering is
+    enough to do that. Nothing crashed.
+
+    Excluding 1-D parameters (LayerNorm gains, all biases) from decay is the
+    standard remedy and is what every transformer implementation does.
+    """
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        (no_decay if param.ndim <= 1 else decay).append(param)
+
+    return torch.optim.Adam(
+        [
+            {"params": decay, "weight_decay": weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=lr,
+    )
+
+
+def assert_not_collapsed(embeddings, name, min_std=1e-4):
+    """
+    Fail loudly if an embedding table degenerated to a single vector.
+
+    A collapsed table is not a crash, it is a silent loss of personalisation:
+    every row identical means every user gets the same recommendations. This
+    check exists because that shipped once, undetected, through training,
+    evaluation, and a cloud deployment.
+    """
+    spread = float(embeddings.std(axis=0).mean())
+    unique_rows = len(np.unique(np.round(embeddings, 5), axis=0))
+    print(f"  {name}: per-dim std {spread:.6f}, {unique_rows:,} unique rows "
+          f"of {len(embeddings):,}")
+    if spread < min_std or unique_rows < 2:
+        raise SystemExit(
+            f"{name} collapsed: per-dimension std {spread:.2e} (min {min_std:.0e}), "
+            f"{unique_rows} unique rows. Every entity would receive identical "
+            f"recommendations. Refusing to export."
+        )
+
+
 def run_epoch(model, loader, features, num_neg, device, optimizer=None):
     """
     Run one pass over `loader`, training if an optimizer is given.
@@ -293,8 +349,8 @@ def train(cfg):
         item_dense_dim=features.item_dense_dim,
     ).to(device)
 
-    optimizer = torch.optim.Adam(
-        model.parameters(),
+    optimizer = build_optimizer(
+        model,
         lr=cfg["training"]["retrieval"]["lr"],
         weight_decay=cfg["training"]["retrieval"]["weight_decay"],
     )
@@ -369,6 +425,7 @@ def train(cfg):
             features.item_batch(all_item_ids).to(device),
         ).cpu().numpy()
 
+    assert_not_collapsed(item_embs, "item embeddings")
     item_emb_path = "datastore/processed/item_embeddings.npy"
     np.save(item_emb_path, item_embs)
     print(f"Saved item embeddings: {item_emb_path}")
@@ -380,6 +437,7 @@ def train(cfg):
             features.user_batch(all_user_ids).to(device),
         ).cpu().numpy()
 
+    assert_not_collapsed(user_embs, "user embeddings")
     user_emb_path = "datastore/processed/user_embeddings.npy"
     np.save(user_emb_path, user_embs)
     print(f"Saved user embeddings: {user_emb_path}")

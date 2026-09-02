@@ -175,3 +175,41 @@ def test_tower_features_enabled_delegates_to_store():
     assert features.user_dense_dim == 30
     assert features.user_batch(torch.tensor([0, 1])).shape == torch.Size([2, 30])
     store.user_batch.assert_called_once()
+
+
+def test_weight_decay_excludes_layernorm_and_biases():
+    """
+    The collapse this prevents: weight decay applied to LayerNorm gains drives
+    them to zero, which zeroes the layer's output, kills the gradient path
+    behind it, and lets decay flatten the rest. The user tower ended up all
+    zeros except a final bias, so every user got the identical embedding.
+    """
+    import torch.nn as nn
+    from training.train_retrieval import build_optimizer
+
+    model = nn.Sequential(nn.Linear(4, 8), nn.LayerNorm(8), nn.ReLU(), nn.Linear(8, 2))
+    opt = build_optimizer(model, lr=0.001, weight_decay=0.01)
+
+    decayed, undecayed = opt.param_groups[0], opt.param_groups[1]
+    assert decayed["weight_decay"] == 0.01
+    assert undecayed["weight_decay"] == 0.0
+    # Only the two Linear weight matrices may be decayed.
+    assert all(p.ndim == 2 for p in decayed["params"])
+    # LayerNorm gain, LayerNorm bias, and both Linear biases must not be.
+    assert all(p.ndim == 1 for p in undecayed["params"])
+    assert len(undecayed["params"]) == 4
+
+
+def test_collapse_assertion_rejects_identical_rows():
+    from training.train_retrieval import assert_not_collapsed
+
+    collapsed = np.repeat(np.array([[0.1, 0.2, 0.3]], dtype=np.float32), 500, axis=0)
+    with pytest.raises(SystemExit, match="collapsed"):
+        assert_not_collapsed(collapsed, "user embeddings")
+
+
+def test_collapse_assertion_accepts_healthy_embeddings():
+    from training.train_retrieval import assert_not_collapsed
+
+    healthy = np.random.default_rng(0).normal(size=(500, 16)).astype(np.float32)
+    assert_not_collapsed(healthy, "user embeddings")   # must not raise
