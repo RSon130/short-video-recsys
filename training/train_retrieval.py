@@ -167,6 +167,62 @@ def bpr_loss(user_emb, pos_item_emb, neg_item_emb):
     return -F.logsigmoid(pos_score - neg_score).mean()
 
 
+def sampled_softmax_loss(user_emb, pos_item_emb, temperature=0.07, false_neg_mask=None):
+    """
+    In-batch sampled softmax (InfoNCE) — cross-entropy over the batch.
+
+    Why this exists, and why BPR was not enough
+    -------------------------------------------
+    BPR gives every user an *independent* objective: point toward whatever
+    direction separates that user's positives from their negatives. Nothing in
+    it relates one user to another, so there is no force keeping two users'
+    embeddings apart.
+
+    On this data that is fatal. Item quality alone explains 29.5% of watch_ratio
+    variance and is by far the strongest single direction, so it acts as an
+    attractor that every user slides into. Training collapsed all 7,176 user
+    embeddings onto one vector — measured per-dimension std 4e-06, one unique
+    row — while still beating a popularity baseline, because a global ordering
+    is enough to do that.
+
+    The signal being abandoned is real, not absent: users' top-50 lists overlap
+    at Jaccard 0.045 against 0.003 expected by chance, and roughly 59% of
+    watch_ratio variance is user-item interaction rather than item or user main
+    effects.
+
+    In-batch softmax supplies the missing term. Each user's positive is scored
+    against *every other user's* positive in the batch, so two users with the
+    same embedding cannot both pick out their own item and the loss penalises
+    them for it. That is cross-user competition, which BPR has none of, and it
+    is why production two-tower systems use this rather than pairwise loss.
+
+    Args:
+        user_emb:     (B, dim) L2-normalised user embeddings.
+        pos_item_emb: (B, dim) embeddings of each user's positive item.
+        temperature:  softmax temperature; lower sharpens the distribution.
+
+    Returns:
+        Scalar loss. Chance level is log(B).
+    """
+    logits = (user_emb @ pos_item_emb.T) / temperature
+
+    # Mask false negatives. In-batch softmax assumes another user's positive is
+    # unlikely to be yours — true on sparse data, false here. Measured on this
+    # split: 13.5% of in-batch negatives are items the user actually likes (an
+    # undercount from a 2M-positive sample; the true rate is higher). Without
+    # masking, a quarter or more of the gradient pushes away items it should
+    # pull closer, the signal cancels, and training sits at chance — log(1024)
+    # = 6.9315, observed 6.9308.
+    #
+    # This is the same failure as the original uniform negative sampling bug:
+    # the standard recipe assumes a sparse matrix and this one is not.
+    if false_neg_mask is not None:
+        logits = logits.masked_fill(false_neg_mask, float("-inf"))
+
+    targets = torch.arange(len(user_emb), device=user_emb.device)
+    return F.cross_entropy(logits, targets)
+
+
 def get_device(cfg):
     """
     Resolve the compute device from config.
@@ -237,7 +293,8 @@ def assert_not_collapsed(embeddings, name, min_std=1e-4):
         )
 
 
-def run_epoch(model, loader, features, num_neg, device, optimizer=None):
+def run_epoch(model, loader, features, num_neg, device, optimizer=None,
+              objective="bpr", temperature=0.07, positives=None):
     """
     Run one pass over `loader`, training if an optimizer is given.
 
@@ -274,7 +331,18 @@ def run_epoch(model, loader, features, num_neg, device, optimizer=None):
             )
             neg_emb = neg_emb_flat.view(batch_size, num_neg, -1)
 
-            loss = bpr_loss(user_emb, pos_emb, neg_emb)
+            if objective == "infonce":
+                mask = None
+                if positives is not None:
+                    u = user_ids.numpy()
+                    i = pos_items.numpy()
+                    # rows = users in the batch, cols = their positive items
+                    dense = positives[u][:, i].toarray().astype(bool)
+                    np.fill_diagonal(dense, False)   # the true target must survive
+                    mask = torch.from_numpy(dense).to(device)
+                loss = sampled_softmax_loss(user_emb, pos_emb, temperature, mask)
+            else:
+                loss = bpr_loss(user_emb, pos_emb, neg_emb)
 
             if training:
                 optimizer.zero_grad()
@@ -357,6 +425,25 @@ def train(cfg):
 
     epochs = cfg["training"]["retrieval"]["epochs"]
     patience = cfg["training"]["retrieval"]["early_stopping_patience"]
+    objective = cfg["two_tower"].get("objective", "bpr")
+    temperature = cfg["two_tower"].get("temperature", 0.07)
+    print(f"Retrieval objective: {objective}"
+          + (f" (temperature {temperature})" if objective == "infonce" else ""))
+
+    # Sparse user x item matrix of known positives, used to mask false negatives
+    # in the in-batch softmax. Built once; each batch pulls a 1024x1024 submatrix.
+    positives = None
+    if objective == "infonce":
+        from scipy.sparse import csr_matrix
+        pos_rows = train_df.loc[
+            train_df[Cols.WATCH_RATIO] >= cfg["features"]["positive_watch_ratio"]
+        ]
+        positives = csr_matrix(
+            (np.ones(len(pos_rows), dtype=np.int8),
+             (pos_rows[Cols.USER_ID].to_numpy(), pos_rows[Cols.ITEM_ID].to_numpy())),
+            shape=(n_users, n_items),
+        )
+        print(f"False-negative mask: {positives.nnz:,} known positives")
 
     # Validation exists to answer "how many epochs?" with evidence instead of a
     # guess. The first full run showed why it matters: training loss bottomed at
@@ -385,8 +472,11 @@ def train(cfg):
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
-        train_loss = run_epoch(model, loader, features, num_neg, device, optimizer)
-        val_loss = run_epoch(model, val_loader, features, num_neg, device)
+        train_loss = run_epoch(model, loader, features, num_neg, device, optimizer,
+                               objective, temperature, positives)
+        val_loss = run_epoch(model, val_loader, features, num_neg, device,
+                             optimizer=None, objective=objective,
+                             temperature=temperature, positives=positives)
         elapsed = time.time() - t0
 
         marker = ""

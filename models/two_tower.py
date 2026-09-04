@@ -41,7 +41,15 @@ class UserTower(nn.Module):
         for h in hidden_dims:
             layers.append(nn.Linear(prev, h))
             layers.append(nn.LayerNorm(h))
-            layers.append(nn.ReLU())
+            # GELU, not ReLU. A ReLU unit whose pre-activation is negative for
+            # every input outputs zero and receives zero gradient — permanently.
+            # That happened here: the user tower's first ReLU died (0% positive
+            # pre-activations, max -0.000), which froze the ID embedding and the
+            # first weight matrix at zero and reduced the whole tower to its
+            # final bias. Every one of 7,176 users then got the identical
+            # embedding and retrieval returned the same list to everybody.
+            # GELU has no flat zero region, so a unit can always recover.
+            layers.append(nn.GELU())
             layers.append(nn.Dropout(dropout))
             prev = h
         layers.append(nn.Linear(prev, output_dim))
@@ -85,7 +93,15 @@ class ItemTower(nn.Module):
         for h in hidden_dims:
             layers.append(nn.Linear(prev, h))
             layers.append(nn.LayerNorm(h))
-            layers.append(nn.ReLU())
+            # GELU, not ReLU. A ReLU unit whose pre-activation is negative for
+            # every input outputs zero and receives zero gradient — permanently.
+            # That happened here: the user tower's first ReLU died (0% positive
+            # pre-activations, max -0.000), which froze the ID embedding and the
+            # first weight matrix at zero and reduced the whole tower to its
+            # final bias. Every one of 7,176 users then got the identical
+            # embedding and retrieval returned the same list to everybody.
+            # GELU has no flat zero region, so a unit can always recover.
+            layers.append(nn.GELU())
             layers.append(nn.Dropout(dropout))
             prev = h
         layers.append(nn.Linear(prev, output_dim))

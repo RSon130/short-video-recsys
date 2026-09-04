@@ -69,6 +69,20 @@ two_tower:
   # where they measurably help.
   use_dense_features: false
 
+  # Retrieval objective.
+  #   infonce  In-batch sampled softmax. Each user's positive competes with the
+  #            other users' positives in the batch, which is the only thing in
+  #            either objective that pushes two user embeddings apart.
+  #   bpr      Pairwise, per-user, independent across users.
+  #
+  # bpr collapsed every user embedding onto a single vector (per-dim std 4e-06,
+  # one unique row of 7,176). Item quality explains 29.5% of watch_ratio
+  # variance and acts as an attractor; nothing in BPR resists it. The abandoned
+  # signal is real — ~59% of variance is user-item interaction, and users' top-50
+  # lists overlap at Jaccard 0.045 vs 0.003 at chance.
+  objective: infonce
+  temperature: 0.07
+
 ranking:
   # MLP ranker: hidden layer widths, then a 1-unit sigmoid head.
   # These were previously named d_model / ffn_dim — Transformer vocabulary for
