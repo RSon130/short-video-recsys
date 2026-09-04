@@ -144,10 +144,23 @@ training:
     checkpoint_dir: checkpoints/ranking
 
 retrieval:
-  # IndexFlatIP — exact inner-product search. At this item count exact search
-  # is ~1 ms, so an approximate index would add tuning burden for no gain.
-  # retrieval/faiss_index.py builds this unconditionally; there is deliberately
-  # no index_type switch until there is a second index to switch to.
+  # IndexFlatIP — exact exhaustive search. Measured, not assumed; the full
+  # comparison is in docs/index_benchmark.md.
+  #
+  # At this catalogue (9,958 items, top_k=200, single-query):
+  #   flat     0.087 ms p50   recall 1.0000   2.55 MB
+  #   ivfflat  0.036 ms p50   recall 0.9051   2.66 MB
+  #   hnsw     0.045 ms p50   recall 0.7683   5.26 MB
+  #
+  # ANN is 2.4x faster and it does not matter: 0.087 ms against a 9.6 ms
+  # end-to-end p95 means the speedup saves 0.5% of a request in exchange for
+  # 10-23% of the true neighbours.
+  #
+  # Exact search is linear — 0.087 ms at 10K, 0.884 ms at 100K, 9.19 ms at 1M —
+  # so the crossover is around 300-500K items for this latency target. Above it,
+  # tune to a recall target rather than a speedup: at 100K, reaching recall >=0.9
+  # needs HNSW at efSearch=256, which is only 1.3x faster than brute force.
+  index_type: flat           # flat | ivfflat | hnsw
   top_k_recall: 200          # candidates passed to the ranker
   index_path: datastore/processed/faiss.index
 

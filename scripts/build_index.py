@@ -42,14 +42,16 @@ def main() -> None:
     processed_dir = project_root / cfg["data"]["processed_dir"]
     embeddings = np.load(processed_dir / "item_embeddings.npy")
 
-    index = faiss_index.build_index(embeddings)
+    index_type = cfg["retrieval"].get("index_type", "flat")
+    index = faiss_index.build_index(embeddings, index_type=index_type)
 
     path = project_root / cfg["retrieval"]["index_path"]
     path.parent.mkdir(parents=True, exist_ok=True)
     faiss_index.save_index(index, path)
 
     n_items, dim = embeddings.shape
-    print(f"Index built: {n_items} items, dim={dim}, saved to {path}")
+    print(f"Index built: {index_type}, {n_items} items, dim={dim}, "
+          f"{faiss_index.index_size_bytes(index)/1e6:.2f} MB, saved to {path}")
 
 
 if __name__ == "__main__":

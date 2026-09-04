@@ -213,9 +213,25 @@ validation loss, restore the best checkpoint, and stop early. The first
 retrieval run made the point: training loss bottomed at epoch 4 and drifted
 upward for 16 more, exporting embeddings from a measurably worse model.
 
-**`IndexFlatIP`, not `IVFFlat`.** Exact search is ~1 ms at 3,327 items. An
-approximate index would add tuning burden for no gain; it earns its place past
-~100K items.
+**`IndexFlatIP`, not `IVFFlat` or HNSW — measured.** All three are implemented
+and benchmarked; full results in [docs/index_benchmark.md](docs/index_benchmark.md).
+
+| index | p50 | recall@200 | size |
+|---|---|---|---|
+| **flat (exact)** | **0.087 ms** | **1.0000** | 2.55 MB |
+| ivfflat | 0.036 ms | 0.9051 | 2.66 MB |
+| hnsw | 0.045 ms | 0.7683 | 5.26 MB |
+
+ANN is 2.4x faster here and irrelevant: 0.087 ms against a 9.6 ms end-to-end p95
+means the speedup saves 0.5% of a request while losing 10-23% of the true
+neighbours.
+
+Exact search is linear — 0.087 ms at 10K, 0.884 ms at 100K, 9.19 ms at 1M — so
+the crossover sits near 300-500K items. The frontier sweep is the useful part:
+recall is a knob, not a property. At 100K, reaching recall >= 0.9 needs HNSW at
+efSearch=256, which is only **1.3x faster than brute force**, and an exhaustive
+IVF is *slower* than flat (0.6x) for identical results. The headline ANN
+speedups all assume a recall nobody would ship.
 
 ## Quickstart
 
@@ -279,7 +295,8 @@ retrieval/       faiss_index.py
 serving/         FastAPI api.py
 evaluation/      metrics.py, baselines.py, ab_test.py
 scripts/         download_kuairec.py, build_index.py, evaluate.py
-docs/            system_design.md, engineering_log.md, progress.md, learning_guide.md
+docs/            system_design.md, engineering_log.md, index_benchmark.md,
+                 deployment.md, progress.md, learning_guide.md
 ```
 
 ## Serving latency
