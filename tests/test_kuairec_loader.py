@@ -261,3 +261,36 @@ def test_load_item_features_mean_aggregation_of_daily(tmp_path):
     loader = KuaiRecLoader(make_cfg(tmp_path))
     result = loader.load_item_features()
     assert result.loc[result["item_id"] == 10, "play_cnt"].iloc[0] == 15.0
+
+
+def test_absent_engagement_columns_are_not_zero_filled(tmp_path):
+    """
+    KuaiRec's matrices carry no per-interaction like/comment/share/follow.
+    Defaulting them to 0 created four all-zero columns that flowed through the
+    whole pipeline — training on one would have silently learned nothing.
+    Absent must stay absent so a consumer gets KeyError instead.
+    """
+    raw = tmp_path / "kuairec"
+    raw.mkdir()
+    pd.DataFrame({
+        "user_id": [0, 0, 1, 1],
+        "video_id": [0, 1, 0, 1],
+        "watch_ratio": [0.9, 0.1, 0.8, 0.2],
+        "timestamp": [1, 2, 3, 4],
+    }).to_csv(raw / "small_matrix.csv", index=False)
+    pd.DataFrame({"video_id": [0, 1], "feat": ["[1]", "[2]"]}).to_csv(
+        raw / "item_categories.csv", index=False)
+
+    cfg = {"data": {"source": "kuairec", "kuairec": {
+        "raw_dir": str(raw), "interaction_file": "small_matrix.csv",
+        "clip_watch_ratio": True, "min_interactions_per_user": 1,
+        "min_interactions_per_item": 1, "column_map": {}}}}
+
+    from data.kuairec import KuaiRecLoader
+    df = KuaiRecLoader(cfg).load_interactions()
+
+    for absent in ("like", "comment", "share", "follow"):
+        assert absent not in df.columns, (
+            f"{absent} was fabricated; it does not exist in KuaiRec matrices"
+        )
+    assert "watch_ratio" in df.columns

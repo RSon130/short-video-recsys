@@ -112,6 +112,66 @@ would need re-measuring after the switch.
 
 ---
 
+## Can like / comment / share be added to the label?
+
+Not on this dataset, and the reason is worth knowing before designing around it.
+
+**KuaiRec's interaction matrices carry no per-interaction engagement.** Both
+files have exactly eight columns:
+
+```
+user_id, video_id, play_duration, video_duration, time, date, timestamp, watch_ratio
+```
+
+No like. No comment. No share. No follow. `watch_ratio` is the only behavioural
+signal that exists per (user, item).
+
+The loader used to default those four to `0` when absent, which carried four
+all-zero columns through the entire pipeline into 297 MB of parquet. Nothing
+ever broke — and that is precisely the danger, because `label = like` would have
+trained on nothing and reported a plausible-looking loss. Absent columns are now
+omitted, so a consumer gets a `KeyError` rather than silence. A test pins it.
+
+### Where engagement does exist
+
+`item_daily_features.csv` has it in quantity, but aggregated **per item per
+day**, across all users:
+
+```
+like_cnt, like_user_num, click_like_cnt, double_click_cnt, cancel_like_cnt,
+comment_cnt, comment_user_num, share_cnt, share_user_num, download_cnt,
+collect_cnt, follow_cnt, cancel_follow_cnt, ...
+```
+
+Twenty-two of these already reach the model as item side features, inside the 83
+item dense dimensions the ranker consumes.
+
+So engagement is present as an **item property** — "this video gets liked a lot"
+— and absent as an **interaction property** — "this user liked this video". Only
+the second can serve as a label. The first is closer to a popularity prior, and
+this project has already measured what happens when the model leans on item-level
+priors: every user embedding collapsed onto the global quality direction.
+
+### What would actually be needed
+
+A multi-signal label is the right instinct and is what production systems use:
+watch time for engagement, like/share for satisfaction, follow for long-term
+value, usually combined with learned or hand-set weights and separate heads.
+
+Two routes to it here:
+
+1. **A different dataset.** KuaiRand, from the same group, records like, follow,
+   forward, comment and hate per interaction. It is the natural upgrade if
+   multi-signal labelling is the goal, and it would also supply the negative
+   feedback (`hate`) that watch_ratio can only approximate.
+2. **A multi-task head on what exists.** Predict watch_ratio *and* the item's
+   aggregate engagement rate, weighting the two. This is weaker — the second
+   task has no per-user variation, so it teaches item quality rather than
+   preference — but it is implementable without new data.
+
+Neither is worth doing before the duration confound above is resolved, because
+any multi-signal label built on a duration-biased watch signal inherits the bias.
+
 ## Verdict
 
 The current definition is a reasonable *first* label and a poor *final* one.

@@ -54,10 +54,27 @@ class KuaiRecLoader(BaseDataLoader):
         df = pd.read_csv(path)
         df = self._rename(df, self._INTERACTION_MAP)
 
-        # Ensure canonical columns exist with sensible defaults
-        for col in [Cols.LIKE, Cols.COMMENT, Cols.SHARE, Cols.FOLLOW]:
-            if col not in df.columns:
-                df[col] = 0
+        # KuaiRec's interaction matrices carry no per-interaction engagement:
+        # big_matrix.csv and small_matrix.csv both have exactly eight columns
+        # (user_id, video_id, play_duration, video_duration, time, date,
+        # timestamp, watch_ratio). There is no like, comment, share or follow.
+        #
+        # This used to default them to 0, which propagated four all-zero columns
+        # through the whole pipeline and into 297 MB of parquet. Nothing broke,
+        # and that is the problem: anyone writing `label = like` would have got
+        # zeros with no error. Absent columns are now left absent, so using one
+        # raises KeyError instead of silently training on nothing.
+        #
+        # Engagement does exist in this dataset, but aggregated per item per day
+        # in item_daily_features.csv (like_cnt, comment_cnt, share_cnt, ...).
+        # Those are loaded as item side features. See docs/label_design.md.
+        missing = [c for c in (Cols.LIKE, Cols.COMMENT, Cols.SHARE, Cols.FOLLOW)
+                   if c not in df.columns]
+        if missing:
+            print(f"  note: {path.name} has no per-interaction engagement "
+                  f"({', '.join(missing)}); these columns are omitted rather "
+                  f"than zero-filled. Item-level engagement is in "
+                  f"item_daily_features.csv.")
 
         if Cols.TIMESTAMP not in df.columns:
             # KuaiRec big_matrix has 'date' as YYYYMMDD integer; derive timestamp
