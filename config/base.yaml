@@ -39,14 +39,33 @@ features:
   item_dense_dim: 16
   num_neg_samples: 4         # negatives per positive for retrieval training
 
-  # Engagement thresholds for BPR labelling. KuaiRec is fully observed (99.6%
-  # density measured on small_matrix), so negatives are *known* low-engagement
-  # interactions rather than guessed-at unobserved pairs. Interactions between
-  # the two thresholds are ambiguous and excluded from retrieval training.
-  # Measured distribution: 56.6% of interactions are >= 0.7, 14.6% are <= 0.3,
-  # and all 1,411 users have at least one item below 0.3.
+  # Engagement thresholds. Negatives are *known* low-engagement interactions
+  # rather than guessed-at unobserved pairs; the ambiguous middle band is
+  # excluded rather than forced into a class.
+  #
+  # Measured on big_matrix, which is what actually trains this system (an
+  # earlier version of this comment quoted small_matrix figures):
+  #   positives  >= 0.7   5,212,987   52.0%
+  #   negatives  <= 0.3   2,374,581   23.7%
+  #   discarded  0.3-0.7  2,435,722   24.3%
+  # Every one of the 7,176 users has both a positive and a negative.
+  #
+  # KNOWN CONFOUND — see docs/label_design.md. watch_ratio correlates with video
+  # duration at -0.40: a video over two minutes is labelled negative 97.4% of the
+  # time whoever watched it, and predicting "short video = positive" reproduces
+  # the label 68.5% of the time against a 52.0% base rate. A large part of what
+  # this label teaches is video length, not preference.
   positive_watch_ratio: 0.7
   negative_watch_ratio: 0.3
+
+  # Deconfound watch_ratio by ranking it within duration buckets — "did this user
+  # watch this more than is typical for a video of this length?". Drops the
+  # duration correlation from -0.405 to -0.053 and flattens the positive rate
+  # across lengths. Off by default because switching it changes 47% of the
+  # training positives and therefore invalidates every metric currently reported.
+  # Sequencing decision, not an endorsement of the raw label.
+  duration_debias: false
+  duration_buckets: 20
 
 two_tower:
   tower_hidden: [256, 128]
