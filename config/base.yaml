@@ -58,14 +58,8 @@ features:
   positive_watch_ratio: 0.7
   negative_watch_ratio: 0.3
 
-  # Deconfound watch_ratio by ranking it within duration buckets — "did this user
-  # watch this more than is typical for a video of this length?". Drops the
-  # duration correlation from -0.405 to -0.053 and flattens the positive rate
-  # across lengths. Off by default because switching it changes 47% of the
-  # training positives and therefore invalidates every metric currently reported.
-  # Sequencing decision, not an endorsement of the raw label.
-  duration_debias: false
-  duration_buckets: 20
+  # Duration deconfounding is designed but NOT implemented — see the Future
+  # work block at the bottom and docs/label_design.md.
 
 two_tower:
   tower_hidden: [256, 128]
@@ -199,6 +193,15 @@ monitoring:
 # ---------------------------------------------------------------------------
 # Future work — NOT implemented. Kept as a record of the planned upgrade path;
 # uncomment only alongside the code that reads it.
+#
+# features:
+#   # Deconfound watch_ratio by ranking it within duration buckets — "did this
+#   # user watch this more than is typical for a video of this length?". Measured
+#   # offline: drops corr(duration, label) from -0.405 to -0.053, and changes 47%
+#   # of training positives, so enabling it invalidates every reported metric.
+#   # Needs a reader in features/engineer.py before it can be uncommented.
+#   duration_debias: true
+#   duration_buckets: 20
 #
 # retrieval:
 #   faiss_index_type: IVFFlat   # requires >~100K items to beat Flat
