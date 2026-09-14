@@ -48,7 +48,7 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 # feature tables 2.3), so they ship inside the image rather than being pulled
 # from object storage at startup. That removes a bucket, a service account, a
 # set of credentials, and the failure mode where the service starts without a
-# model. system_design.md originally specified GCS for artifacts; at this size
+# model. The original design doc specified GCS for artifacts; at this size
 # that trade does not pay. It would once a rebuild per retrain becomes painful.
 FROM runtime AS deploy
 COPY datastore/processed/ /app/datastore/processed/

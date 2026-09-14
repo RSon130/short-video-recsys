@@ -1,220 +1,149 @@
 # Short-Video RecSys
 
-A two-stage recommender for short-video feeds — two-tower retrieval with ANN
-search, followed by a neural ranker — built on KuaiRec, a fully-observed
-interaction dataset from the Kuaishou short-video platform. The architecture
-follows the retrieval-then-ranking pattern used by YouTube, TikTok, and
-Pinterest.
+A two-stage recommender for short-video feeds — two-tower retrieval with FAISS
+search, followed by a neural ranker — built on **KuaiRec**, a public
+interaction dataset from the Kuaishou short-video platform, and deployed as a
+containerised API on GCP Cloud Run.
+
+This is a personal project on a public dataset, not a production system. There
+is no live traffic; every result is an offline evaluation on a temporal
+hold-out. What it does have is the full lifecycle — data, training, statistical
+evaluation, serving, deployment — and a written record of what broke along the
+way and how each problem was found: **[docs/engineering_log.md](docs/engineering_log.md)**.
 
 ```
 Request
-  └─ Stage 1 · Retrieval   Two-Tower (BPR) + FAISS IndexFlatIP → top-200 candidates
-  └─ Stage 2 · Ranking     MLP ranker (pairwise BPR loss)      → top-K scored items
-  └─ Serving               FastAPI + in-memory TTL cache
+  └─ Stage 1 · Retrieval   Two-tower, in-batch softmax (InfoNCE) + FAISS exact search → top-200
+  └─ Stage 2 · Ranking     MLP ranker, pairwise loss                                  → top-K
+  └─ Serving               FastAPI + in-memory TTL cache, Docker, Cloud Run
 ```
+
+## Current status
+
+> **Results were re-measured on 2026-09-14 and several earlier headline numbers
+> are superseded.** The retrieval model they came from had silently collapsed:
+> all 7,176 user embeddings were one identical vector, so every user received
+> the same list. The fix, the diagnosis, and the re-measurement are in
+> [engineering log §11 and §14](docs/engineering_log.md).
+
+| | status |
+|---|---|
+| Retrieval personalises (7,176 distinct user embeddings) | ✅ fixed and re-measured |
+| Retrieval beats popularity | ✅ +132.6% recall@10, 95% CI excludes zero |
+| Ranker improves on retrieval | ❌ **currently −26% — the ranker hurts**; under investigation |
+| Duration-confounded label | ⚠️ measured, fix designed, not enabled ([label_design.md](docs/label_design.md)) |
+| Deployed service | ⚠️ still runs the pre-fix model; not updated while the ranker regression is open |
 
 ## Dataset
 
-KuaiRec ships two subsets, and the system was measured on both. `small_matrix`
-is *fully observed* — nearly every (user, item) pair carries a real
-`watch_ratio` — which invalidates several standard recipes and drives most of
-the design decisions below.
-
-| | `small_matrix` | `big_matrix` |
+| | `small_matrix` | `big_matrix` (default) |
 |---|---|---|
 | Interactions | 4,676,570 | **12,529,113** |
 | Users × items | 1,411 × 3,327 | 7,176 × 9,958 |
 | Density | **99.6%** | 17.5% |
+| Relevance base rate after excluding seen items | 25% | 1.1% |
 | Split | temporal 80/10/10 | temporal 80/10/10 |
 
-Default config runs `big_matrix`; switch the `interaction_file` in
-`config/kuairec.yaml` for the dense subset.
+`small_matrix` is *fully observed* — nearly every (user, item) pair carries a
+real `watch_ratio`. That invalidates several standard recipes that assume a
+sparse matrix, and it is the root cause of three separate bugs in the log.
 
-## Results
+Switch `interaction_file` in `config/kuairec.yaml` to change subsets.
 
-The system was evaluated on both KuaiRec subsets, which sit in very different
-regimes. The contrast is the most interesting result here: **which stage carries
-the system depends on catalogue size and density.**
+## Results — `big_matrix`, 6,873 test users
 
-| | `small_matrix` | `big_matrix` |
-|---|---|---|
-| Interactions | 4.68M | **12.53M** |
-| Users × items | 1,411 × 3,327 | 7,176 × 9,958 |
-| Density | 99.6% | 17.5% |
-| Eligible items per user | ~676 | ~8,771 |
-| Relevance base rate | 25% | 1.1% |
-
-### `big_matrix` — 12.5M interactions, 6,873 test users
+Relevance is `watch_ratio >= 0.7` in the test split. Every system excludes items
+the user already saw in training.
 
 | system | recall@5 | recall@10 | ndcg@10 | recall@20 |
 |---|---|---|---|---|
 | popularity baseline | 0.0052 | 0.0055 | 0.0052 | 0.0061 |
-| retrieval only | **0.0191** | 0.0131 | 0.0130 | 0.0134 |
-| **full pipeline** | 0.0150 | **0.0149** | **0.0133** | 0.0112 |
+| **retrieval only** | **0.0143** | **0.0129** | **0.0134** | **0.0121** |
+| full pipeline | 0.0097 | 0.0095 | 0.0093 | 0.0102 |
 
-Every comparison is a **paired bootstrap** on the same users, with a 95%
-confidence interval — see [Experiment statistics](#experiment-statistics).
+Paired bootstrap on identical users, recall@10:
 
 | comparison | lift | 95% CI | |
 |---|---|---|---|
-| retrieval vs popularity | +136.2% | [+0.0065, +0.0086] | significant |
-| full pipeline vs popularity | **+169.9%** | [+0.0084, +0.0104] | significant |
-| full pipeline vs retrieval only | **+14.3%** | [+0.0007, +0.0030] | significant |
+| retrieval vs popularity | **+132.6%** | [+0.0063, +0.0084] | significant |
+| full pipeline vs popularity | +72.1% | [+0.0030, +0.0050] | significant |
+| full pipeline vs retrieval only | **−26.0%** | [−0.0045, −0.0022] | significant |
 
-At a 1.1% relevance base rate a non-personalised list stops working, and
-narrowing 8,771 candidates to 200 has real value — the opposite of
-`small_matrix`, where a 25% base rate made popularity unbeatable. Retrieval
-still leads at K=5: the ranker only ever sees the shortlist it is handed.
+What this does and does not show:
+
+- **Retrieval works.** It beats popularity by a wide, statistically clear margin.
+- **The ranker currently makes things worse.** Before the collapse fix it added
+  +14.3% on top of retrieval; retrained on the new embeddings it subtracts 26%.
+  The cause is not yet known. Leading hypothesis and next steps are in
+  [engineering log §14](docs/engineering_log.md).
+- **Fixing the collapse did not raise recall.** The collapsed model scored
+  +136.2% over popularity and the fixed one +132.6% — at this base rate a global
+  ordering with per-user seen-item exclusion is already a strong baseline.
+  The fix matters because the system now responds to the user at all.
+- Retrieval's watch-time AUC among its own candidates is 0.34, below chance.
+  That is the most likely lead on both open problems.
+
+### Superseded results
+
+These were real measurements, taken on the collapsed retrieval model. They are
+kept so the history is auditable, not as claims:
+
+| comparison | then | now |
+|---|---|---|
+| retrieval vs popularity | +136.2% | +132.6% |
+| full pipeline vs popularity | +169.9% | +72.1% |
+| full pipeline vs retrieval only | +14.3% | −26.0% |
+
+The ranker objective comparison (pointwise MSE vs pairwise vs listwise) and the
+`small_matrix` results in the engineering log were also measured before the fix
+and have not been re-run.
 
 ## Experiment statistics
 
-Comparisons are **paired** — every system scored on identical users, then
-differenced per user. A live A/B test splits traffic because it must (one person
-cannot be shown two feeds at once) and pays for it with between-group variance.
-Offline that constraint does not exist, so copying the split would discard half
-the data per model for nothing. Pairing also removes between-user variance,
-which here dwarfs the effects being measured: the +14.3% two-stage lift is
-detectable *because* it is paired.
+Comparisons are **paired** — every system scored on the same users, then
+differenced per user. A live A/B test splits traffic because one person cannot
+see two feeds at once; offline that constraint does not exist, and pairing
+removes between-user variance, which here is far larger than the effects being
+measured.
 
 The harness also reports a sample-ratio check on the hash bucketing (0.504 vs
-0.500 expected, z=+0.69) and a power calculation. That last one is sobering: at
-3,436 users per arm the smallest detectable lift is ~21%, and detecting a 5%
-lift would need ~62,000 users per arm.
+0.500 expected, z=+0.69) and a power calculation. At 3,436 users per arm the
+smallest detectable lift is 26.5%, and detecting a 5% lift would take ~97,000
+users per arm.
 
-This exists because of a specific failure. A 150-user sample once showed the
-pipeline beating popularity by +0.7%, and the full 1,411-user set reversed that
-to −0.9%. The sample was far below the detectable threshold — it was never a
-signal. A confidence interval says so immediately; a point estimate does not.
-
-### The ranker's objective matters more than its architecture
-
-The same network, the same features, the same candidates — only the loss changed.
-All three objectives are implemented and selectable via `ranking.objective`:
-
-| objective | recall@5 | recall@10 | recall@20 | watch-AUC |
-|---|---|---|---|---|
-| pointwise — MSE on watch_ratio | 0.0031 | 0.0070 | 0.0093 | **0.714** |
-| **pairwise — BPR** | **0.0112** | **0.0141** | 0.0099 | 0.622 |
-| listwise — sampled softmax | 0.0081 | 0.0099 | **0.0100** | 0.609 |
-
-> **These three rows were produced under loss-based checkpoint selection**, which
-> was later found unsound (see below) — the same pairwise config re-run gave
-> recall@10 anywhere from 0.0102 to 0.0149 depending on which epoch was picked.
-> The *ordering* here held up and is why pairwise is the default, but treat the
-> absolute values as superseded by the headline table above (recall@10 0.0149,
-> selected on validation recall). Re-running all three under metric-based
-> selection is open work.
-
-MSE optimises *calibration* — how much of a video someone will watch — and it
-wins on watch-time AUC, which is exactly the metric that rewards calibration.
-But recall@K rewards *ordering*, and a regression head minimising squared error
-is pulled toward the conditional mean, flattening the distinctions that decide
-the top slots. Under MSE the full pipeline scored below retrieval alone at every
-cutoff; under a ranking loss it overtakes retrieval at K=10 and beats popularity
-everywhere.
-
-Retrieval had trained with a ranking loss (BPR) from the start. The ranker was
-the only stage optimising something other than the metric it was judged on.
-
-The trade is visible and expected: watch-time AUC falls from 0.714 to 0.622.
-A production system wanting both would use a multi-task head — ranking loss for
-ordering, regression for calibrated watch-time prediction.
-
-**Listwise did not beat pairwise**, contrary to expectation — sampling more
-negatives per step usually helps, which is why large-scale rankers use a sampled
-softmax. One explanation was tested and refuted: per-user negative pools are
-large (median 233 items; only 1% of users below 10), so drawing 4 with
-replacement is not collapsing to duplicates.
-
-The remaining hypothesis is untested: with four *easy* random negatives the
-softmax is satisfied as soon as the positive outranks all of them, so gradients
-vanish earlier in training than single-pair BPR's. If that is right, the fix is
-harder negatives rather than more of them — sampling from retrieval's shortlist
-instead of the whole low-watch pool.
-
-Retrieval still leads at K=5 and K=20. The ranker only ever sees what retrieval
-passes it, so its ceiling is retrieval's shortlist. Both open threads therefore
-point at the same place: **candidate generation, not the ranker.**
-
-### `small_matrix` — 4.68M interactions, all 1,411 test users
-
-Relevance is `watch_ratio >= 0.7`; every system excludes items the user already
-consumed in training.
-
-| system | recall@10 | ndcg@10 | recall@20 | ndcg@20 | watch-time AUC |
-|---|---|---|---|---|---|
-| popularity baseline | **0.4806** | **0.4900** | 0.4629 | 0.4744 | — |
-| retrieval only | 0.2824 | 0.3323 | 0.2599 | 0.2987 | 0.542 |
-| **full pipeline** | 0.4609 | 0.4310 | 0.4588 | 0.4406 | **0.826** |
-
-**What the ranking stage adds** — the case for two stages:
-
-| metric | retrieval only | full pipeline | lift |
-|---|---|---|---|
-| recall@10 | 0.2824 | 0.4609 | **+63.2%** |
-| recall@20 | 0.2599 | 0.4588 | **+76.5%** |
-| ndcg@20 | 0.2987 | 0.4406 | **+47.5%** |
-| watch-time AUC | 0.542 | 0.826 | **+52.4%** |
-
-**On this subset the pipeline does not beat the popularity baseline** (−4.1%
-recall@10, −0.9% recall@20). That is a real finding, not a tuning failure:
-
-- After excluding seen items, each user has only ~676 eligible items, ~173 of
-  which are relevant — a **25% base rate**. On a small, dense catalogue where
-  popular items are broadly enjoyed, popularity is a genuinely strong baseline.
-- Retrieval's job is *narrowing*. At 3,327 items there is little to narrow, so
-  the stage that carries a production system contributes little here. The
-  measured retrieval AUC of 0.542 says as much.
-
-A 150-user sample initially showed the pipeline ahead by 0.7% at recall@20. On
-the full test set that reverses to −0.9%, so the apparent win was sampling
-noise. The full-set number is the one reported.
+This exists because of a specific failure: a 150-user sample once showed the
+pipeline ahead of popularity by +0.7%, and the full test set reversed that to
+−0.9%. A confidence interval says "no signal" immediately; a point estimate
+does not.
 
 ## Design decisions
 
-**Negatives come from observed low engagement, not from unobserved pairs.**
-The standard implicit-feedback recipe — observed item positive, random
-unobserved item negative — assumes a sparse matrix, where an unobserved pair is
-a fair guess at disinterest. At 99.6% density there are almost no unobserved
-pairs, so a uniformly drawn "negative" is an observed interaction with the same
-`watch_ratio` distribution as the positives (mean 0.702 either way). Trained
-that way, BPR loss sat at 0.597 against a random-init baseline of log(2) ≈
-0.693 — the positives and negatives were statistically identical and there was
-no signal to learn. Positives are now `watch_ratio >= 0.7`, negatives are the
-*same user's* items at `<= 0.3`, and the ambiguous middle band is excluded.
-Loss dropped to 0.264.
+**Negatives come from observed low engagement, not unobserved pairs.** At 99.6%
+density a uniformly drawn "negative" is an observed interaction with the same
+`watch_ratio` distribution as the positives (mean 0.702 either way). Positives
+are `watch_ratio >= 0.7`, negatives the *same user's* items at `<= 0.3`, and the
+ambiguous middle is excluded. BPR loss went from 0.597 (no signal) to 0.264.
 
-**Relevance is engagement, not exposure.** Ground truth uses the same
-`watch_ratio` threshold as training. Counting any test-split row as relevant
-would measure which items a user was *shown* on a matrix where nearly
-everything is shown.
+**Retrieval uses in-batch softmax with false-negative masking.** Pairwise BPR
+has no term relating one user to another, and every user embedding collapsed
+onto the dominant item-quality direction. In-batch softmax adds cross-user
+competition, but 13.5%+ of in-batch negatives were the user's own positives,
+which held training at chance until known positives were masked out.
 
-**Side features are excluded from the retrieval towers, by measurement.**
+**Checkpoints are selected on held-out recall@10, not validation loss** — for
+both models. Two identical ranker runs had near-identical loss and a 38% recall
+gap; for retrieval, validation loss rose every epoch after the first.
 
-| towers | retrieval recall@10 | full-pipeline recall@10 | AUC |
-|---|---|---|---|
-| ID only | 0.2747 | **0.4793** | **0.854** |
-| ID + side features | 0.2887 | 0.3593 | 0.753 |
+**Training and serving share one feature path.** An earlier version served the
+ranker zeros for 47% of its input. Features are normalised (signed `log1p`, then
+z-score) at write time, and evaluation refuses to run if model provenance and
+config disagree.
 
-Side features lift retrieval slightly on its own yet cost the end-to-end system
-a quarter of its recall. The item features are dominated by category one-hots
-and popularity counts, which cluster the embedding space by category rather
-than by affinity, handing the ranker a more homogeneous shortlist. The ranker
-consumes those same features directly, where they measurably help.
+**Relevance is engagement, not exposure.** On a matrix where nearly everything
+is shown, counting any test row as relevant measures exposure.
 
-**Dense features are normalised before use.** Raw item features reach 2.6e11
-while tower embeddings are L2-normalised to ~0.1. Fed to the ranker unscaled,
-its sigmoid saturated and it emitted 1.0 for every input — validation MSE stuck
-at exactly `var + (1-mean)² = 0.1999`. Signed `log1p` then a z-score, applied at
-write time so training, evaluation, and serving read identical values.
-
-**Epoch counts come from validation, not from the config.** Both models track
-validation loss, restore the best checkpoint, and stop early. The first
-retrieval run made the point: training loss bottomed at epoch 4 and drifted
-upward for 16 more, exporting embeddings from a measurably worse model.
-
-**`IndexFlatIP`, not `IVFFlat` or HNSW — measured.** All three are implemented
-and benchmarked; full results in [docs/index_benchmark.md](docs/index_benchmark.md).
+**Exact search (`IndexFlatIP`), not IVF or HNSW — measured.** Full results in
+[docs/index_benchmark.md](docs/index_benchmark.md).
 
 | index | p50 | recall@200 | size |
 |---|---|---|---|
@@ -222,16 +151,33 @@ and benchmarked; full results in [docs/index_benchmark.md](docs/index_benchmark.
 | ivfflat | 0.036 ms | 0.9051 | 2.66 MB |
 | hnsw | 0.045 ms | 0.7683 | 5.26 MB |
 
-ANN is 2.4x faster here and irrelevant: 0.087 ms against a 9.6 ms end-to-end p95
-means the speedup saves 0.5% of a request while losing 10-23% of the true
-neighbours.
+Against a 9.6 ms end-to-end p95, ANN saves 0.5% of a request for 10–23% of the
+true neighbours. Exact search is linear (0.087 ms at 10K, 9.19 ms at 1M), so the
+crossover is near 300–500K items. At 100K, recall >= 0.9 needs HNSW at
+efSearch=256, only 1.3x faster than brute force.
 
-Exact search is linear — 0.087 ms at 10K, 0.884 ms at 100K, 9.19 ms at 1M — so
-the crossover sits near 300-500K items. The frontier sweep is the useful part:
-recall is a knob, not a property. At 100K, reaching recall >= 0.9 needs HNSW at
-efSearch=256, which is only **1.3x faster than brute force**, and an exhaustive
-IVF is *slower* than flat (0.6x) for identical results. The headline ANN
-speedups all assume a recall nobody would ship.
+**Side features are excluded from the retrieval towers.** An ablation on
+`small_matrix` found they lifted retrieval alone but cut end-to-end recall by a
+quarter. That ablation predates the collapse fix and has not been re-run.
+
+## Serving latency
+
+Deployed on **GCP Cloud Run** (`us-central1`, 1 vCPU / 2Gi, scale-to-zero), 500
+requests at concurrency 4. Latency depends on model shape (64-dim embeddings,
+200 candidates, the same MLP), not on learned weights, so these figures apply to
+the retrained model as well.
+
+| vantage | p50 | p95 | p99 | includes |
+|---|---|---|---|---|
+| app self-reported | — | 2.4 ms | — | handler only |
+| **Cloud Run platform** (`request_latencies`) | **5.0 ms** | **9.6 ms** | 10.0 ms | handler + framework + ingress |
+| client (laptop) | — | 75–105 ms | — | + internet round trip |
+
+The platform figure is stable while the client figure varies 40% between
+sessions: a remote client's wait is dominated by network. That is also why the
+TTL cache is invisible end to end — it still protects CPU under concurrency,
+but a faster feed would come from regional placement. Deployment is scripted:
+[docs/deployment.md](docs/deployment.md).
 
 ## Quickstart
 
@@ -294,60 +240,21 @@ training/        train_retrieval.py, train_ranking.py
 retrieval/       faiss_index.py
 serving/         FastAPI api.py
 evaluation/      metrics.py, baselines.py, ab_test.py
-scripts/         download_kuairec.py, build_index.py, evaluate.py
-docs/            system_design.md, engineering_log.md, index_benchmark.md,
-                 deployment.md, progress.md, learning_guide.md
+scripts/         download, build_index, evaluate, benchmark_index, loadtest, deploy
+docs/            engineering_log.md   what broke, how it was found, what it measured
+                 label_design.md      the duration confound in the training label
+                 index_benchmark.md   exact vs ANN search
+                 deployment.md        Cloud Run deploy and latency measurement
 ```
-
-## Serving latency
-
-Deployed on **GCP Cloud Run** (`us-central1`, 1 vCPU / 2Gi, scale-to-zero).
-500 requests at concurrency 4, driven from a laptop; cold and warm reported
-separately.
-
-**Measured by Cloud Run**, `run.googleapis.com/request_latencies` — the
-platform's own view, independent of any client:
-
-| | p50 | p95 | p99 |
-|---|---|---|---|
-| **Cloud Run request latency** | **5.0 ms** | **9.6 ms** | 10.0 ms |
-
-Three vantage points measure three different things, and conflating them is the
-easy mistake:
-
-| vantage | p95 | what it includes |
-|---|---|---|
-| app self-reported | 2.4 ms | the handler only |
-| **Cloud Run platform** | **9.6 ms** | handler + framework + container ingress |
-| client (laptop) | 75–105 ms | all of the above + internet round trip |
-
-The client figure varies 40% between sessions while the platform figure is
-stable, which is the whole finding: what a remote client waits for is dominated
-by network, and what the service does is small and consistent. **Quote 9.6 ms** —
-it is the platform's measurement of the service, not the app grading its own
-homework, and not a number that moves with whichever café wifi ran the test.
-
-That gap also explains why the TTL cache is invisible end-to-end: at ~10 ms of
-service time against ~70 ms of round trip, the cache optimises a small slice of
-what the user actually waits for. It still protects CPU under concurrency; it is
-simply not a latency win for a remote client. A faster feed would come from
-regional placement.
-
-Locally on a dedicated core the same image serves cold p95 **4.7 ms** (server-side
-1.6 ms), cold start **2.0 s**. Deployment is scripted — see
-[docs/deployment.md](docs/deployment.md).
 
 ## Stack
 
-PyTorch · FAISS · FastAPI · Docker · pandas/NumPy · pytest (157 tests)
+PyTorch · FAISS · FastAPI · Docker · GCP Cloud Run · pandas/NumPy · pytest (196 tests)
 
 ## Next
 
-- **Multi-task ranking head** — a ranking loss for ordering plus a regression
-  head for calibrated watch-time, recovering the AUC the pairwise objective
-  trades away (0.714 → 0.622) without giving back top-K recall.
-- **Stronger candidate generation.** The ranker's ceiling is retrieval's
-  shortlist; retrieval still leads at K=5. Hard-negative mining and multi-source
-  recall (popularity + tag similarity) target that directly.
-- Deploy to GCP Cloud Run and measure p50/p95 under load.
-- Multi-task ranking (watch + like), then a Transformer ranker.
+1. **Explain the ranker regression** — check the ranker's input distribution
+   under the new embeddings; add logQ correction to retrieval's in-batch softmax.
+2. **Duration-debiased label**, as a separate measured change.
+3. Re-run the ranker objective comparison under recall-based selection.
+4. Redeploy once the full pipeline beats retrieval alone.

@@ -209,7 +209,7 @@ monitoring:
 #   nprobe: 10
 #
 # two_tower:
-#   temperature: 0.07           # InfoNCE only; unused by BPR
+#   (temperature is live: see two_tower above)
 #
 # ranking:
 #   transformer_heads: 4        # Transformer ranker

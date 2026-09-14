@@ -7,7 +7,9 @@ The project began as a complete, well-documented codebase that had **never been
 executed**: no data downloaded, no checkpoints, no metrics — the README's results
 table was seven dashes. Nine defects surfaced, none of which was visible by
 reading the code. That is the theme worth carrying out of this project: the code
-looked finished.
+looked finished. Sections 10–14 came later, once the system ran end to end — the
+most consequential (§11) was a model that trained, evaluated, beat its baseline,
+deployed, and gave every user the same feed.
 
 ---
 
@@ -93,7 +95,7 @@ every epoch. The arithmetic identifies it exactly — MSE `= var + (1-mean)^2 =
 
 Raw item features reach **2.6e11** and user features ~2e3, while tower embeddings
 are L2-normalised to ~0.1 — twelve orders of magnitude into the same Linear
-layer, saturating the sigmoid. `system_design.md` §4.1 had specified "normalised
+layer, saturating the sigmoid. The original design doc (§4.1) had specified "normalised
 numerics"; nothing implemented it.
 
 Signed `log1p` (count columns span many orders of magnitude) then a z-score,
@@ -125,12 +127,115 @@ Related, same root cause: ground truth counted **any** test-split row as
 relevant. On a 99.6%-dense matrix that measures *exposure*, not preference.
 Relevance now uses the same `watch_ratio` threshold as training.
 
+## 10. Checkpoints were selected on a loss that did not track the metric
+
+Two pairwise ranker runs with identical config reached validation losses of
+0.2718 and 0.2708 — effectively the same — and recall@10 of **0.0141 and
+0.0102**, a 38% gap. Choosing "the best epoch" by loss was close to arbitrary
+with respect to ranking quality, and run-to-run noise was larger than the
+differences being compared between objectives.
+
+The ranker now scores a fixed 300-user validation probe every epoch and keeps
+the checkpoint with the best recall@10. Training is seeded, and the selected
+epoch, objective, and training time go into `ranker_meta.json`; `evaluate.py`
+refuses to run if that file disagrees with the config.
+
+Retrieval later needed the same fix (see §14): its in-batch softmax validation
+loss rose after epoch 1 while held-out recall told a different story.
+
+## 11. Every user received the same recommendations
+
+Nothing crashed and no metric flagged it. It surfaced while inspecting what a
+row of `user_embeddings.npy` looks like: **all 7,176 user embeddings were one
+identical vector** (per-dimension std ~3e-06, one unique row). Retrieval returned
+the same list to everybody, and still beat popularity by +136%, because a learned
+global item ordering plus per-user exclusion of seen items is enough to do that.
+
+Each step of the diagnosis was measured before moving to the next:
+
+| hypothesis | evidence | fix tried | result |
+|---|---|---|---|
+| weight decay on LayerNorm gains | user tower weights all 0.000000 except the final bias | 1-D params excluded from decay | still collapsed |
+| dying ReLU | 0% positive pre-activations | GELU | still collapsed |
+| no signal to learn | ~59% of watch_ratio variance is user×item interaction; users' top-50 lists overlap at Jaccard 0.045 vs 0.003 by chance | — | signal exists: an optimisation failure, not a data limit |
+| **BPR has no cross-user term** | item quality alone explains 29.5% of variance and acts as an attractor every user slides into | in-batch softmax (InfoNCE) | 7,176 unique embeddings, but loss at chance: 6.9308 vs log(1024) = 6.9315 |
+| **false negatives in the batch** | 13.5%+ of in-batch "negatives" are the user's own positives — the sparsity assumption fails on dense data | mask known positives out of the softmax | **learns** |
+
+The last row is the same mistake as §6 in a new place: a standard recipe that
+assumes a sparse interaction matrix, applied to one that is not.
+
+A guard now exists so this cannot ship silently again: training refuses to
+export an embedding table whose rows have collapsed, and a test pins that check.
+
+## 12. The label measures video length
+
+`corr(video_duration, watch_ratio) = −0.40`. Completing a 5-second clip is easy
+and completing a 3-minute one is rare, so videos over 120 s are labelled negative
+**97.4%** of the time whoever watched them, and a rule that ignores the user and
+predicts "short = positive" reproduces the label 68.5% of the time against a 52%
+base rate.
+
+Ranking `watch_ratio` within 20 duration buckets drops the correlation to −0.05,
+and **changes 47% of the positives**. It is designed and measured but not
+enabled: switching it invalidates every reported number, and it was deliberately
+kept separate from the §11 retrain so the effect of each change can be
+attributed. Full analysis: [label_design.md](label_design.md).
+
+## 13. Exact search beats ANN at this scale — measured
+
+FAISS flat, IVF, and HNSW are all implemented and benchmarked on the trained
+embeddings. At 9,958 items exact search takes 0.087 ms p50 with recall 1.0; IVF
+is 0.036 ms at recall 0.905 and HNSW 0.045 ms at recall 0.768. Against a 9.6 ms
+end-to-end p95, ANN would save 0.5% of a request for 10–23% of the true
+neighbours. Exact search scales linearly (9.19 ms at 1M), so the crossover is
+around 300–500K items. Full sweep: [index_benchmark.md](index_benchmark.md).
+
+## 14. After the collapse fix: retrieval personalises, and the ranker now hurts
+
+Full retrain with masked InfoNCE, checkpoints selected on held-out recall@10
+over 1,000 users. Validation loss would have picked badly: it rose every epoch
+after the first while training loss kept falling.
+
+| epoch | train loss | val loss | val recall@10 | val recall@200 |
+|---|---|---|---|---|
+| **1** | 6.2840 | 6.6436 | **0.02673** | 0.04680 |
+| 2 | 6.1008 | 6.6628 | 0.02333 | 0.04370 |
+| 3 | 6.0171 | 6.6870 | 0.02503 | 0.05543 |
+| 4 | 5.9631 | 6.7294 | 0.02310 | 0.05239 |
+
+7,176 distinct user embeddings (per-dim std 0.070). The ranker was retrained on
+the new embeddings. Test set, 6,873 users, paired bootstrap:
+
+| system | recall@10 | ndcg@10 | vs popularity, 95% CI |
+|---|---|---|---|
+| popularity | 0.0055 | 0.0052 | — |
+| retrieval only | 0.0129 | 0.0134 | **+132.6%** [+0.0063, +0.0084] |
+| full pipeline | 0.0095 | 0.0093 | +72.1% [+0.0030, +0.0050] |
+
+**Full pipeline vs retrieval only: −26.0%**, CI [−0.0045, −0.0022]. Under the
+collapsed retrieval the ranker added +14.3%. It now makes results worse.
+
+Three honest readings:
+
+- The fix restored personalisation but did **not** raise offline recall: the
+  collapsed model scored +136.2% over popularity, the fixed one +132.6%.
+- Retrieval's watch-time AUC is **0.34** — below chance — so its scores run
+  against watch_ratio among its own candidates. Untested hypothesis: in-batch
+  negatives are drawn in proportion to item frequency with no logQ correction,
+  which pushes popular items down, and popular items here skew short and
+  high-watch-ratio (§12).
+- Both stages select epoch 1. Something overfits early, which argues for
+  regularisation or a higher temperature before any architecture change.
+
+The ranker regression is not yet explained, so the deployed service has **not**
+been updated to this model.
+
 ---
 
 ## How a pair is labelled
 
-The question an interviewer asks as *"how do you decide one item is better than
-another?"* — the answer is that the model never decides. It is read off observed
+*"How do you decide one item is better than another?"* — the model never
+decides. It is read off observed
 behaviour.
 
 For a given user:
@@ -234,6 +339,14 @@ it. Both objectives stay selectable so the comparison is reproducible.
 
 ## Open work
 
+> The comparisons in "The two findings worth discussing" predate §11: their
+> ranker results were measured on candidates from the collapsed retrieval model.
+
+- **Explain the ranker regression (§14)** — first. Check whether the ranker's
+  input distribution shifted with the new embeddings, and try logQ correction
+  in retrieval.
+- **Duration-debiased label (§12)**, as its own measured step.
+
 - **Hard-negative mining** — the highest-value open item. Both unexplained
   results point at it: listwise gained nothing from more *easy* negatives, and
   retrieval still leads at K=5. Sampling negatives from retrieval's top-200
@@ -246,4 +359,3 @@ it. Both objectives stay selectable so the comparison is reproducible.
 - **Stronger candidate generation.** The ranker's ceiling is retrieval's
   shortlist, and retrieval still leads at K=5. Hard-negative mining and
   multi-source recall target that directly.
-- **Cloud Run deployment** and p50/p95 under load.
