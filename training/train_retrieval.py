@@ -293,6 +293,67 @@ def assert_not_collapsed(embeddings, name, min_std=1e-4):
         )
 
 
+class RetrievalProbe:
+    """
+    Recall@K of the two towers on held-out users, used to choose the checkpoint.
+
+    Why not validation loss: the first InfoNCE run showed validation loss rising
+    from epoch 1 to epoch 2 (6.6436 -> 6.6628) while training loss fell
+    sharply. In-batch softmax loss depends on which items happen to share a
+    batch, so it is a noisy proxy for ranking quality. The ranker hit the same
+    problem — identical-config runs with near-identical validation loss differed
+    by 38% in recall@10 — and was fixed by selecting on the metric instead.
+
+    Scoring is exact and matches serving: every item is scored against each
+    probe user, items the user already saw in training are excluded, and the
+    top K are compared with the user's validation positives.
+    """
+    def __init__(self, train_df, val_df, n_users_total, n_items, pos_threshold,
+                 seed, n_users=1000):
+        from scipy.sparse import csr_matrix
+
+        rng = np.random.default_rng(seed)
+        relevant = val_df.loc[val_df[Cols.WATCH_RATIO] >= pos_threshold]
+        truth = relevant.groupby(Cols.USER_ID)[Cols.ITEM_ID].apply(set).to_dict()
+
+        users = sorted(truth)
+        if len(users) > n_users:
+            users = sorted(rng.choice(users, n_users, replace=False).tolist())
+        self.user_ids = np.asarray(users, dtype=np.int64)
+        self.truth = [truth[u] for u in users]
+
+        seen = csr_matrix(
+            (np.ones(len(train_df), dtype=np.int8),
+             (train_df[Cols.USER_ID].to_numpy(), train_df[Cols.ITEM_ID].to_numpy())),
+            shape=(n_users_total, n_items),
+        )
+        self.seen = torch.from_numpy(seen[self.user_ids].toarray().astype(bool))
+        self.n_items = n_items
+
+    def recall_at_k(self, model, features, device, ks=(10, 200)):
+        """Mean recall@k for each k; recall is hits / min(k, |relevant|)."""
+        model.eval()
+        with torch.no_grad():
+            item_ids = torch.arange(self.n_items)
+            item_emb = model.item_tower(
+                item_ids.to(device), features.item_batch(item_ids).to(device))
+            uids = torch.from_numpy(self.user_ids)
+            user_emb = model.user_tower(
+                uids.to(device), features.user_batch(uids).to(device))
+            scores = (user_emb @ item_emb.T).cpu()
+            scores = scores.masked_fill(self.seen, float("-inf"))
+            top = torch.topk(scores, max(ks), dim=1).indices.numpy()
+
+        results = {}
+        for k in ks:
+            total = 0.0
+            for row, relevant in zip(top, self.truth):
+                hits = len(set(row[:k].tolist()) & relevant)
+                total += hits / min(k, len(relevant))
+            results[k] = total / len(self.truth) if self.truth else float("nan")
+        return results
+
+
 def run_epoch(model, loader, features, num_neg, device, optimizer=None,
               objective="bpr", temperature=0.07, positives=None):
     """
@@ -465,10 +526,19 @@ def train(cfg):
     )
     print(f"Validation pairs: {len(val_dataset):,}")
 
+    probe = RetrievalProbe(
+        train_df, val_df, n_users, n_items,
+        pos_threshold=cfg["features"]["positive_watch_ratio"],
+        seed=cfg["project"]["seed"],
+    )
+    print(f"Recall probe: {len(probe.truth):,} held-out users")
+
+    best_recall = -1.0
     best_val = float("inf")
     best_state = None
     best_epoch = 0
     epochs_without_improvement = 0
+    history = []
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
@@ -477,10 +547,15 @@ def train(cfg):
         val_loss = run_epoch(model, val_loader, features, num_neg, device,
                              optimizer=None, objective=objective,
                              temperature=temperature, positives=positives)
+        recall = probe.recall_at_k(model, features, device)
         elapsed = time.time() - t0
+        history.append({"epoch": epoch, "train_loss": train_loss,
+                        "val_loss": val_loss, "val_recall@10": recall[10],
+                        "val_recall@200": recall[200]})
 
         marker = ""
-        if val_loss < best_val:
+        if recall[10] > best_recall:
+            best_recall = recall[10]
             best_val = val_loss
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             best_epoch = epoch
@@ -490,7 +565,9 @@ def train(cfg):
             epochs_without_improvement += 1
 
         print(f"Epoch {epoch}/{epochs} — train: {train_loss:.4f} — "
-              f"val: {val_loss:.4f} — {elapsed:.1f}s{marker}")
+              f"val: {val_loss:.4f} — val recall@10: {recall[10]:.5f} — "
+              f"val recall@200: {recall[200]:.5f} — {elapsed:.1f}s{marker}",
+              flush=True)
 
         if epochs_without_improvement >= patience:
             print(f"Early stopping: no validation improvement in {patience} epochs.")
@@ -498,7 +575,24 @@ def train(cfg):
 
     # Everything downstream must come from the best model, not the last one.
     model.load_state_dict(best_state)
-    print(f"Restored best model from epoch {best_epoch} (val loss {best_val:.4f})")
+    print(f"Restored best model from epoch {best_epoch} "
+          f"(val recall@10 {best_recall:.5f}, val loss {best_val:.4f})")
+
+    import json
+    from datetime import datetime, timezone
+    meta = {
+        "objective": objective,
+        "temperature": temperature if objective == "infonce" else None,
+        "best_epoch": best_epoch,
+        "best_val_recall_at_10": best_recall,
+        "best_val_loss": best_val,
+        "selected_on": "val_recall@10",
+        "history": history,
+        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    with open("datastore/processed/retrieval_meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    print("Wrote retrieval_meta.json")
 
     ckpt_dir = Path(cfg["training"]["retrieval"]["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)

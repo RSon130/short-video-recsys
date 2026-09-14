@@ -213,3 +213,39 @@ def test_collapse_assertion_accepts_healthy_embeddings():
 
     healthy = np.random.default_rng(0).normal(size=(500, 16)).astype(np.float32)
     assert_not_collapsed(healthy, "user embeddings")   # must not raise
+
+
+def test_retrieval_probe_excludes_seen_items_and_scores_recall():
+    from training.train_retrieval import RetrievalProbe
+
+    class Stub(torch.nn.Module):
+        # user 0 prefers items 0 then 1 then 2; user 1 prefers item 3.
+        def __init__(self):
+            super().__init__()
+            self.u = torch.tensor([[1.0, 0.0], [-0.1, 1.0]])
+            self.i = torch.tensor([[1.0, 0.0], [0.9, 0.0], [0.8, 0.0], [0.0, 1.0]])
+
+        def user_tower(self, ids, dense):
+            return self.u[ids]
+
+        def item_tower(self, ids, dense):
+            return self.i[ids]
+
+    class NoFeatures:
+        def user_batch(self, ids):
+            return torch.zeros(len(ids), 0)
+
+        def item_batch(self, ids):
+            return torch.zeros(len(ids), 0)
+
+    # User 0 already saw item 0 in training, so the top pick must be item 1.
+    train_df = pd.DataFrame({"user_id": [0], "item_id": [0], "watch_ratio": [1.0]})
+    val_df = pd.DataFrame({"user_id": [0, 1], "item_id": [1, 2],
+                           "watch_ratio": [0.9, 0.9]})
+    probe = RetrievalProbe(train_df, val_df, n_users_total=2, n_items=4,
+                           pos_threshold=0.7, seed=0)
+
+    recall = probe.recall_at_k(Stub(), NoFeatures(), torch.device("cpu"), ks=(1, 3))
+    # user 0: top-1 = item 1 (hit). user 1: top-1 = item 3 (miss), top-3 contains 2.
+    assert recall[1] == pytest.approx(0.5)
+    assert recall[3] == pytest.approx(1.0)
