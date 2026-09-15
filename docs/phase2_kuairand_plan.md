@@ -1,6 +1,6 @@
 # Phase 2 plan: KuaiRand
 
-**Status:** approved 2026-09-15, not started. The plan was reviewed by a
+**Status:** approved 2026-09-15. Phase 0 is in progress; see "Phase 0 amendments". The plan was reviewed by a
 fresh-context AI agent before approval. Its corrections are folded in and listed
 at the end.
 
@@ -268,6 +268,71 @@ The fresh-context AI-agent review of the draft plan made these changes:
 - PLE dropped, MMoE kept as an ablation.
 - Calibration before fusion.
 - Effort raised from 5–6 to 8–10 days.
+
+## Phase 0 amendments (2026-09-15, before the gate's validation run)
+
+The audit (`scripts/audit_kuairand.py`, `datastore/processed/kuairand_audit.json`)
+and a fresh-context AI-agent review of the audit and gate design changed the
+following. None was made after looking at gate results.
+
+**Data facts corrected**
+- The 4/08–4/21 standard log starts on **4/09**. It is front-loaded: 4/10–4/12
+  carry 665K of its 1.14M rows, and 4/17–4/21 only 20–44K rows a day.
+- 15,609 exact duplicate rows, plus ~1K rows sharing (user, video, time_ms);
+  deduplicated on that key.
+- 1,075 random-log users have no train-window history; 45 random items are
+  unseen in it.
+- `upload_dt` has three distinct values, so item age is not a usable feature.
+
+**Tab rule**
+- The pre-registered two-column rule (`is_click` agrees with valid_play on
+  < 99% of rows) failed its premise: no tab reaches 99%, and the main feed,
+  tab 1, agrees 96.7%.
+- Replacement: a tab is two-column if ≥ 90% of its unclicked impressions have
+  zero play time. That gives tabs 0, 3, 8 two-column and 1, 2, 4, 5, 6
+  single-column. Every threshold from 0.2 to 0.99 gives the same split.
+- **The random log is 99.3% tab 1**, so two-column click cannot be evaluated
+  on the unbiased log and is dropped. Per-tab reporting is dropped too.
+
+**Rare labels** (validation users with both classes, of 8,147; test estimates
+are about 2.35×)
+
+| label | validation users | estimated test users |
+|---|---|---|
+| like | 705 | ~1,660 |
+| composite `explicit_positive` | 875 | ~2,055 |
+| follow | 77 | — |
+| comment | 80 | — |
+| forward | 108 | — |
+| hate | 139 | — |
+
+- Under the half-width rule, only the composite stays in the gate family, and
+  only because the rule always keeps it: its own half-width is 0.0188.
+- **Consequence for later phases:**
+  - per-task claims are possible only for like, the composite, click and
+    long_view;
+  - follow, comment, forward and hate heads are descriptive only, and their
+    negative-transfer tests cannot conclude;
+  - utility fusion is a demo, not a validated result.
+
+**Duration**
+- Shortest-first GAUC on the random log is 0.571 for like and 0.563 for the
+  composite. The effect is between duration bands; within-band AUC is ≈ 0.50.
+- The duration baselines stay in the comparator set.
+
+**Gate design (v2)**
+- Fixed 300 LightGBM rounds. Early stopping on the 4/21 rows (6–210 users per
+  label) picked noise.
+- Expanding daily cutoffs over 4/13–4/20, giving 344K fit rows instead of 94K.
+- Share and rate features only.
+- Item statistics from single-column rows.
+- Primary evaluation on all tabs; tab 1 only as a sensitivity check.
+- Also reports personal vs the non-personal LightGBM.
+- Power: NO-GO means no gain above about 0.02 was detected.
+
+**Disclosure.** The audit's duration table scored every random-log user,
+including test users, with a fixed shortest-first baseline. No model or tuned
+scorer touched test users. Future audits use validation users only.
 
 ## References
 
