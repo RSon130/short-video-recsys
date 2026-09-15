@@ -238,7 +238,7 @@ been updated to this model.
 ## 15. Diagnosing §14: exposure, staleness, and a ranker that sorts by duration
 
 Read-only diagnosis (`scripts/diagnose_ranker.py`, `diagnose_retrieval.py`,
-`diagnose_staleness.py`), checked by a fresh-context reviewer who corrected two
+`diagnose_staleness.py`), checked by a fresh-context AI-agent reviewer, which corrected two
 of my conclusions.
 
 **What the ranker does**
@@ -325,7 +325,7 @@ videos per user:
   within-candidate AUC +0.090 over retrieval, Holm-corrected, item bootstrap
   above zero.
 
-**Why that pass does not mean what it says.** A fresh-context review of the
+**Why that pass does not mean what it says.** A fresh-context AI-agent review of the
 results showed this, and I verified the key numbers.
 
 *1. The comparison point is broken.* Retrieval orders its own top 200 worse
@@ -358,7 +358,7 @@ A bucket-level check averaged it away.
   exposure-unbiased evaluation.
 - The strongest signal available is non-personal (item quality within
   duration) or temporal (recency).
-- The protocol, a label check, and two fresh-context reviews are what kept a
+- The protocol, a label check, and two fresh-context AI-agent reviews are what kept a
   letter-of-the-protocol "pass" from being reported as a win.
 
 **Protocol limitations that need a revision (v3) before the next result**

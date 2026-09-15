@@ -211,7 +211,7 @@ changes which users or labels training sees.
 - **Validation scoring is recorded.** Retrieval keeps per-epoch history in its
   meta file; the ranker's epochs are recorded in its training log.
 
-**v1 → v2 (before implementation, after a fresh-context review).** The reviewer
+**v1 → v2 (before implementation, after a fresh-context AI-agent review).** The reviewer
 computed the following on raw data under v1's label (residual = `watch_ratio`
 minus bucket median, within-user top 30%). These numbers were seen before v2
 was fixed.

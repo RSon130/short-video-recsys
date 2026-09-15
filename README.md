@@ -36,7 +36,7 @@ How the project got there matters more than the number:
 3. **The evaluation protocol was written and reviewed before any model was
    scored:** [docs/evaluation_protocol.md](docs/evaluation_protocol.md). It
    fixes the label, six baselines, Holm-corrected comparisons, a three-cutoff
-   sensitivity rule and an item bootstrap. Independent fresh-context reviews
+   sensitivity rule and an item bootstrap. Fresh-context AI-agent reviews (not human reviewers)
    checked the design, the implementation and the results.
 
 Test users: 1,012. Label: within-user top 30% of within-duration-bucket
