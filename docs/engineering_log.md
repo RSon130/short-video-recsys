@@ -230,6 +230,145 @@ Three honest readings:
 The ranker regression is not yet explained, so the deployed service has **not**
 been updated to this model.
 
+> **Superseded by §15–§17.** Two hypotheses above turned out wrong. The 0.34
+> watch-time AUC came from pooling all users together (per user it is 0.54),
+> and logQ is not the lead explanation. The numbers in this section were also
+> measured before duplicate rows were removed (§16).
+
+## 15. Diagnosing §14: exposure, staleness, and a ranker that sorts by duration
+
+Read-only diagnosis (`scripts/diagnose_ranker.py`, `diagnose_retrieval.py`,
+`diagnose_staleness.py`), checked by a fresh-context reviewer who corrected two
+of my conclusions.
+
+**What the ranker does**
+- Its scores are essentially "shortest video first": per-user Spearman −0.92
+  with duration, and +0.96 with the same score averaged across users. It
+  barely agrees with retrieval (+0.08).
+- It trains on pairs of videos the user *watched*, so it learns completion
+  given exposure. It is evaluated on *unwatched* candidates, where relevance
+  also requires the platform to have shown the video.
+- It promotes stale videos: 46.5% of its top-10 had recent training activity,
+  against 67.5% for retrieval. When its picks were shown, they were hits more
+  often (0.817 vs 0.620). It fails at predicting exposure, not taste.
+
+**Recency matters for both stages.** A training-window recency filter lifted
+retrieval by +30% and the ranker by +55%. The ranker still lost 20% to
+retrieval afterwards.
+
+**Refuted along the way**
+- Ranker overfitting: the test used could not detect it, and ranker and
+  retrieval scores are nearly uncorrelated anyway.
+- Popularity as the missing signal: re-ranking candidates by popularity also
+  scores 0.0084.
+
+**Found**
+- The ranker's item features were averaged over the full data period,
+  including val and test.
+
+## 16. The evaluation was measuring exposure, and the data had 968K duplicate rows
+
+**An unbiased test set was sitting unused.** KuaiRec's `small_matrix`:
+- shares all of its 1,411 users and 3,327 videos with `big_matrix`;
+- shares **no** (user, video) pair with it;
+- is 99.6% observed.
+
+That makes it an exposure-unbiased test set for models trained on `big_matrix`.
+
+**The existing models, scored on it before any fix:**
+- The ranker tied "shortest first".
+- Retrieval was anti-correlated with finishing (AUC 0.29).
+- With duration controlled, everything sat at chance.
+
+**Exact duplicate rows.** `big_matrix.csv` has **968,005 exact duplicate
+rows** (same user, video and millisecond timestamp): 6.3% of the old train
+split, 22.6% of val, 4.6% of test.
+- They cluster on a few days: 67% of all rows on Jul 27.
+- Items first seen on Aug 4 got thousands of copies.
+- Removed in the loader. A test pins it.
+
+**What this changes**
+- A test-retest analysis that read duplicate pairs 11 seconds apart as
+  re-views had shown watch_ratio "repeating" at 0.61. Genuine re-views a day
+  or more apart agree at 0.27.
+- The old popularity baseline on the big hold-out (recall@10 0.0055) was
+  inflated by those duplicated recent items. Deduplicated it is 0.0016, so the
+  "+132.6% over popularity" claim no longer stands.
+
+A pre-registered protocol replaces the temporal hold-out:
+[evaluation_protocol.md](evaluation_protocol.md). A reviewer checked it before
+implementation and changed the label, the two-stage metrics and the baselines.
+A second reviewer checked the implementation.
+
+## 17. Results under the pre-registered protocol
+
+1,012 test users. Primary label: within-user top 30% of within-duration-bucket
+watch_ratio percentiles. The label check passed. Per-user AUC over ~3,300
+videos per user:
+
+| system | per-user AUC | NDCG@10 |
+|---|---|---|
+| **B3 item quality within duration** (non-personal) | **0.548** | 0.320 |
+| B4 item-kNN | 0.519 | 0.322 |
+| B6 user duration preference | 0.517 | 0.338 |
+| ranker alone | 0.516 | 0.424 |
+| B2 shortest first | 0.515 | **0.440** |
+| retrieval | 0.512 | 0.240 |
+| B5 platform completion within duration | 0.509 | 0.321 |
+| B0 random | 0.500 | 0.297 |
+| B1 popularity | 0.492 | 0.350 |
+
+**Pre-registered verdict (§7)**
+- Retrieval does **not** add value: it beats only popularity.
+- The ranker alone does **not** add value: it beats only popularity.
+- "Ranker adds value in two-stage": **passes**. NDCG@10 +0.155 and
+  within-candidate AUC +0.090 over retrieval, Holm-corrected, item bootstrap
+  above zero.
+
+**Why that pass does not mean what it says.** A fresh-context review of the
+results showed this, and I verified the key numbers.
+
+*1. The comparison point is broken.* Retrieval orders its own top 200 worse
+than random: NDCG@10 0.240 vs 0.316 for a shuffle. It prefers long, unpopular
+videos: item score vs duration +0.49, vs positive-count popularity −0.74. That
+is consistent with in-batch softmax having no logQ correction, but it is not
+tested.
+
+*2. The ranker is a duration sort.* Spearman 0.96 with shortest-first inside
+the candidates. Replacing the ranker with a plain shortest-first reorder of the
+same 200 candidates scores **higher** (NDCG@10 0.407 vs 0.395).
+
+*3. The label is not debiased at the extremes.* The per-bucket check passed,
+but the widest bucket (57.6–315 s) still has a strong duration gradient
+inside it. Positive rate by duration decile within that bucket:
+0.73 → 0.72 → 0.67 → 0.54 → 0.32 → 0.12 → 0.06 → 0.05 → 0.04 → 0.03.
+A bucket-level check averaged it away.
+
+**Big-matrix hold-out, re-run for continuity.**
+- Retrieval 0.0162 recall@10, full pipeline 0.0154 (−4.9%, not significant),
+  popularity 0.0016.
+- A trivial baseline, popularity over only the last 3 days of training, scores
+  **0.0502**, about 3× the pipeline. That check was post-hoc, a single run
+  with no bootstrap.
+- The −26% → −4.9% change mixes deduplication, new checkpoint selection and a
+  retrained ranker, so it cannot be attributed to any one of them.
+
+**What this project can honestly claim**
+- Neither learned stage beats simple, fair baselines on KuaiRec under an
+  exposure-unbiased evaluation.
+- The strongest signal available is non-personal (item quality within
+  duration) or temporal (recency).
+- The protocol, a label check, and two fresh-context reviews are what kept a
+  letter-of-the-protocol "pass" from being reported as a win.
+
+**Protocol limitations that need a revision (v3) before the next result**
+- Condition on duration continuously, or with log-spaced buckets, and check
+  the gradient *within* buckets.
+- Add random and shortest-first reranker controls to the two-stage comparison.
+- Add a recency baseline.
+- Record the 20% and 50% label checks: both fall outside the range, though
+  only 30% was pre-registered.
+
 ---
 
 ## How a pair is labelled

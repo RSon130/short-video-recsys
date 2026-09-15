@@ -26,7 +26,11 @@ data:
       is_share: share
       is_follow: follow
 
-    # watch_ratio in KuaiRec can exceed 1.0 (replays); clip to [0, 1]
-    clip_watch_ratio: true
+    # watch_ratio in KuaiRec can exceed 1.0 (replays). Not clipped: the
+    # evaluation label (docs/evaluation_protocol.md) ranks watch_ratio within
+    # duration buckets, and clipping at 1.0 would tie every replayed short
+    # video. Training labels only use the 0.7 / 0.3 thresholds, so they are
+    # unaffected.
+    clip_watch_ratio: false
     min_interactions_per_user: 5
     min_interactions_per_item: 5

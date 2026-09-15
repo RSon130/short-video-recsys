@@ -6,10 +6,10 @@ interaction dataset from the Kuaishou short-video platform, and deployed as a
 containerised API on GCP Cloud Run.
 
 This is a personal project on a public dataset, not a production system. There
-is no live traffic; every result is an offline evaluation on a temporal
-hold-out. What it does have is the full lifecycle — data, training, statistical
-evaluation, serving, deployment — and a written record of what broke along the
-way and how each problem was found: **[docs/engineering_log.md](docs/engineering_log.md)**.
+is no live traffic; every result is an offline evaluation. What it does have is
+the full lifecycle — data, training, evaluation, serving, deployment — and a
+written record of what broke, how each problem was found, and what the honest
+result turned out to be: **[docs/engineering_log.md](docs/engineering_log.md)**.
 
 ```
 Request
@@ -18,85 +18,79 @@ Request
   └─ Serving               FastAPI + in-memory TTL cache, Docker, Cloud Run
 ```
 
-## Current status
+## Headline result
 
-> **Results were re-measured on 2026-09-14 and several earlier headline numbers
-> are superseded.** The retrieval model they came from had silently collapsed:
-> all 7,176 user embeddings were one identical vector, so every user received
-> the same list. The fix, the diagnosis, and the re-measurement are in
-> [engineering log §11 and §14](docs/engineering_log.md).
+**Under a pre-registered, exposure-unbiased evaluation, neither learned stage
+beats simple baselines.** The strongest signal in this data is non-personal
+(item quality within a duration band) or temporal (recency).
+
+How the project got there matters more than the number:
+
+1. **The original hold-out measured exposure, not preference.** It only
+   contains videos the platform chose to show. KuaiRec ships a near-fully
+   observed `small_matrix` that shares every user and video with `big_matrix`
+   but no (user, video) pair, and it had gone unused. It is now the test set.
+2. **The raw data had 968,005 exact duplicate rows**, clustered on a few days.
+   They had inflated the popularity baseline, and with it the earlier
+   "+132.6% over popularity" claim, which is withdrawn.
+3. **The evaluation protocol was written and reviewed before any model was
+   scored:** [docs/evaluation_protocol.md](docs/evaluation_protocol.md). It
+   fixes the label, six baselines, Holm-corrected comparisons, a three-cutoff
+   sensitivity rule and an item bootstrap. Independent fresh-context reviews
+   checked the design, the implementation and the results.
+
+Test users: 1,012. Label: within-user top 30% of within-duration-bucket
+watch_ratio percentiles.
+
+| system | per-user AUC | NDCG@10 |
+|---|---|---|
+| item quality within duration (non-personal baseline) | **0.548** | 0.320 |
+| item-kNN collaborative filtering | 0.519 | 0.322 |
+| ranker alone | 0.516 | 0.424 |
+| shortest video first | 0.515 | **0.440** |
+| retrieval | 0.512 | 0.240 |
+| random | 0.500 | 0.297 |
+
+The protocol's "ranker improves two-stage" test **technically passed**
+(NDCG@10 +0.155). The follow-up diagnostics are why it is not reported as a
+win:
+- retrieval orders its own top-200 worse than random;
+- the ranker's score correlates 0.96 with shortest-first;
+- a plain shortest-first reorder of the same candidates scores higher.
+
+The label's widest duration bucket (57–315 s) also still carries a duration
+gradient. Full analysis: [engineering log §15–§17](docs/engineering_log.md).
 
 | | status |
 |---|---|
-| Retrieval personalises (7,176 distinct user embeddings) | ✅ fixed and re-measured |
-| Retrieval beats popularity | ✅ +132.6% recall@10, 95% CI excludes zero |
-| Ranker improves on retrieval | ❌ **currently −26% — the ranker hurts**; under investigation |
-| Duration-confounded label | ⚠️ measured, fix designed, not enabled ([label_design.md](docs/label_design.md)) |
-| Deployed service | ⚠️ still runs the pre-fix model; not updated while the ranker regression is open |
+| Embedding collapse (all users identical) | ✅ fixed: 7,176 distinct user embeddings |
+| Exposure-unbiased evaluation with pre-registered protocol | ✅ in place |
+| Retrieval or ranker beats fair baselines | ❌ no |
+| Label fully duration-controlled | ⚠️ not within the widest bucket; protocol v3 needed |
+| Deployed service | ⚠️ still runs an older model; not updated, since no model beats the baselines |
 
 ## Dataset
 
-| | `small_matrix` | `big_matrix` (default) |
+| | `small_matrix` (evaluation) | `big_matrix` (training) |
 |---|---|---|
-| Interactions | 4,676,570 | **12,529,113** |
-| Users × items | 1,411 × 3,327 | 7,176 × 9,958 |
-| Density | **99.6%** | 17.5% |
-| Relevance base rate after excluding seen items | 25% | 1.1% |
-| Split | temporal 80/10/10 | temporal 80/10/10 |
-
-`small_matrix` is *fully observed* — nearly every (user, item) pair carries a
-real `watch_ratio`. That invalidates several standard recipes that assume a
-sparse matrix, and it is the root cause of three separate bugs in the log.
-
-Switch `interaction_file` in `config/kuairec.yaml` to change subsets.
-
-## Results — `big_matrix`, 6,873 test users
-
-Relevance is `watch_ratio >= 0.7` in the test split. Every system excludes items
-the user already saw in training.
-
-| system | recall@5 | recall@10 | ndcg@10 | recall@20 |
-|---|---|---|---|---|
-| popularity baseline | 0.0052 | 0.0055 | 0.0052 | 0.0061 |
-| **retrieval only** | **0.0143** | **0.0129** | **0.0134** | **0.0121** |
-| full pipeline | 0.0097 | 0.0095 | 0.0093 | 0.0102 |
-
-Paired bootstrap on identical users, recall@10:
-
-| comparison | lift | 95% CI | |
-|---|---|---|---|
-| retrieval vs popularity | **+132.6%** | [+0.0063, +0.0084] | significant |
-| full pipeline vs popularity | +72.1% | [+0.0030, +0.0050] | significant |
-| full pipeline vs retrieval only | **−26.0%** | [−0.0045, −0.0022] | significant |
-
-What this does and does not show:
-
-- **Retrieval works.** It beats popularity by a wide, statistically clear margin.
-- **The ranker currently makes things worse.** Before the collapse fix it added
-  +14.3% on top of retrieval; retrained on the new embeddings it subtracts 26%.
-  The cause is not yet known. Leading hypothesis and next steps are in
-  [engineering log §14](docs/engineering_log.md).
-- **Fixing the collapse did not raise recall.** The collapsed model scored
-  +136.2% over popularity and the fixed one +132.6% — at this base rate a global
-  ordering with per-user seen-item exclusion is already a strong baseline.
-  The fix matters because the system now responds to the user at all.
-- Retrieval's watch-time AUC among its own candidates is 0.34, below chance.
-  That is the most likely lead on both open problems.
+| Interactions | 4,676,570 | 11,561,093 after removing 968,005 duplicates |
+| Users × items | 1,411 × 3,327 | 7,176 × 9,940 |
+| Density | **99.6%** | ~16% |
+| Shared (user, video) pairs | 0 | 0 |
 
 ### Superseded results
 
-These were real measurements, taken on the collapsed retrieval model. They are
-kept so the history is auditable, not as claims:
+These were real measurements on the `big_matrix` temporal hold-out, which
+rewards predicting exposure. They are kept so the history is auditable, not as
+claims:
 
-| comparison | then | now |
-|---|---|---|
-| retrieval vs popularity | +136.2% | +132.6% |
-| full pipeline vs popularity | +169.9% | +72.1% |
-| full pipeline vs retrieval only | +14.3% | −26.0% |
+| comparison | collapsed model | after collapse fix | after dedup and protocol selection |
+|---|---|---|---|
+| retrieval vs popularity (recall@10) | +136.2% | +132.6% | popularity baseline no longer valid (duplicates) |
+| full pipeline vs retrieval | +14.3% | −26.0% | −4.9%, not significant |
 
-The ranker objective comparison (pointwise MSE vs pairwise vs listwise) and the
-`small_matrix` results in the engineering log were also measured before the fix
-and have not been re-run.
+A post-hoc popularity baseline over only the last 3 days of training reaches
+recall@10 0.050 on that hold-out, about 3× the pipeline.
 
 ## Experiment statistics
 
@@ -249,12 +243,15 @@ docs/            engineering_log.md   what broke, how it was found, what it meas
 
 ## Stack
 
-PyTorch · FAISS · FastAPI · Docker · GCP Cloud Run · pandas/NumPy · pytest (196 tests)
+PyTorch · FAISS · FastAPI · Docker · GCP Cloud Run · pandas/NumPy · pytest (207 tests)
 
 ## Next
 
-1. **Explain the ranker regression** — check the ranker's input distribution
-   under the new embeddings; add logQ correction to retrieval's in-batch softmax.
-2. **Duration-debiased label**, as a separate measured change.
-3. Re-run the ranker objective comparison under recall-based selection.
-4. Redeploy once the full pipeline beats retrieval alone.
+1. **Protocol v3**, fixed before any new result: continuous or log-spaced
+   duration conditioning checked *within* buckets; random and shortest-first
+   reranker controls for the two-stage comparison; a recency baseline.
+2. **Retrieval's anti-popularity bias**: test logQ correction in the in-batch
+   softmax. Retrieval currently prefers long, unpopular videos.
+3. **Ranker**: train it against what it is evaluated on (unwatched candidates)
+   and remove its ability to sort by duration alone.
+4. Redeploy only a model that beats the baselines under the protocol.

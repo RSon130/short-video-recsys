@@ -445,7 +445,24 @@ def train(cfg):
         return total / len(data_loader)
 
     probe = ValidationProbe(cfg, user_embs, item_embs, features, train_df, val_df)
-    print(f"Validation probe: {probe.n_users} users, selecting on recall@10")
+    print(f"big_matrix recall probe: {probe.n_users} users (logged, not used for selection)")
+
+    # Selection follows docs/evaluation_protocol.md v2: two-stage NDCG@10 on
+    # small_matrix validation users — retrieval's top 200, reordered by this
+    # ranker — under the duration-controlled label.
+    from evaluation.small_matrix import SmallMatrixProbe
+    sm_probe = SmallMatrixProbe(cfg, train_df, len(item_embs), split="val")
+    print(f"Selection probe: {len(sm_probe.users):,} small_matrix validation users, two-stage NDCG@10")
+
+    def sm_ndcg():
+        model.eval()
+
+        def ranker_fn(user, items):
+            x = torch.from_numpy(features.build_batch(user_embs[user], item_embs, user, items))
+            with torch.no_grad():
+                return model(x.to(device)).squeeze(1).cpu().numpy()
+
+        return sm_probe.mean_two_stage_ndcg(lambda user, items: item_embs[items] @ user_embs[user], ranker_fn)
 
     best_recall = -1.0
     best_val = float("inf")
@@ -458,13 +475,14 @@ def train(cfg):
         train_loss = run_epoch(loader, True)
         val_loss = run_epoch(val_loader, False)
         val_recall = probe.recall_at_k(model, device, k=10)
+        val_ndcg = sm_ndcg()
         elapsed = time.time() - t0
 
-        # Select on recall@10, not on the loss. They do not move together: two
-        # runs with near-identical loss differed by 38% in recall@10.
+        # Select on the protocol metric, not on the loss. They do not move
+        # together: two runs with near-identical loss differed by 38% in recall.
         marker = ""
-        if val_recall > best_recall:
-            best_recall = val_recall
+        if val_ndcg > best_recall:
+            best_recall = val_ndcg
             best_val = val_loss
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             best_epoch = epoch
@@ -474,7 +492,8 @@ def train(cfg):
             epochs_without_improvement += 1
 
         print(f"Epoch {epoch}/{epochs} — train {objective}: {train_loss:.6f} — "
-              f"val {objective}: {val_loss:.6f} — val recall@10: {val_recall:.5f} — "
+              f"val {objective}: {val_loss:.6f} — big val recall@10: {val_recall:.5f} — "
+              f"small val two-stage NDCG@10: {val_ndcg:.4f} — "
               f"{elapsed:.1f}s{marker}")
 
         if epochs_without_improvement >= patience:
@@ -483,7 +502,7 @@ def train(cfg):
 
     model.load_state_dict(best_state)
     print(f"Restored best ranker from epoch {best_epoch} "
-          f"(val recall@10 {best_recall:.5f}, val {objective} {best_val:.6f})")
+          f"(small_matrix val two-stage NDCG@10 {best_recall:.4f}, val {objective} {best_val:.6f})")
 
     torch.save(model.state_dict(), "datastore/processed/ranker_model.pt")
 
@@ -496,8 +515,8 @@ def train(cfg):
         "objective": objective,
         "best_epoch": best_epoch,
         "best_val_loss": float(best_val),
-        "best_val_recall_at_10": float(best_recall),
-        "selected_on": "val_recall@10",
+        "best_small_val_two_stage_ndcg10": float(best_recall),
+        "selected_on": "small_matrix_val_two_stage_ndcg@10 (docs/evaluation_protocol.md v2)",
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "n_train_rows": len(dataset),
         "interaction_file": cfg["data"]["kuairec"]["interaction_file"],

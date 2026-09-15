@@ -54,6 +54,16 @@ class KuaiRecLoader(BaseDataLoader):
         df = pd.read_csv(path)
         df = self._rename(df, self._INTERACTION_MAP)
 
+        # big_matrix.csv carries 968,005 exact duplicate rows — same user, video
+        # and timestamp to the millisecond. They are logging artefacts, not
+        # re-watches: they overweighted 6.3% of training rows and 22.6% of the
+        # old validation split, and made repeat-view analyses look far more
+        # consistent than genuine re-views are.
+        n_before = len(df)
+        df = self.drop_exact_duplicates(df)
+        if len(df) != n_before:
+            print(f"  removed {n_before - len(df):,} exact duplicate interaction rows")
+
         # KuaiRec's interaction matrices carry no per-interaction engagement:
         # big_matrix.csv and small_matrix.csv both have exactly eight columns
         # (user_id, video_id, play_duration, video_duration, time, date,
@@ -141,6 +151,12 @@ class KuaiRecLoader(BaseDataLoader):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def drop_exact_duplicates(df: pd.DataFrame) -> pd.DataFrame:
+        """Drop rows repeating (user, item, timestamp) exactly."""
+        key = [c for c in (Cols.USER_ID, Cols.ITEM_ID, "timestamp") if c in df.columns]
+        return df.drop_duplicates(subset=key)
 
     def _filter_cold_start(self, df: pd.DataFrame) -> pd.DataFrame:
         """Remove users/items with too few interactions."""

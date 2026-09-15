@@ -531,7 +531,25 @@ def train(cfg):
         pos_threshold=cfg["features"]["positive_watch_ratio"],
         seed=cfg["project"]["seed"],
     )
-    print(f"Recall probe: {len(probe.truth):,} held-out users")
+    print(f"Recall probe: {len(probe.truth):,} held-out users (logged, not used for selection)")
+
+    # Checkpoints are selected on the pre-registered protocol
+    # (docs/evaluation_protocol.md): mean per-user AUC on small_matrix
+    # *validation* users, under the duration-controlled label. The big_matrix
+    # recall probe is still logged, but it rewards predicting exposure.
+    from evaluation.small_matrix import SmallMatrixProbe
+    sm_probe = SmallMatrixProbe(cfg, train_df, n_items, split="val")
+    print(f"Selection probe: {len(sm_probe.users):,} small_matrix validation users, per-user AUC")
+
+    def sm_auc():
+        model.eval()
+        with torch.no_grad():
+            all_items = torch.arange(n_items)
+            v = model.item_tower(all_items.to(device), features.item_batch(all_items).to(device)).cpu().numpy()
+            uids = torch.from_numpy(sm_probe.users)
+            u = model.user_tower(uids.to(device), features.user_batch(uids).to(device)).cpu().numpy()
+        row = {int(x): k for k, x in enumerate(sm_probe.users)}
+        return sm_probe.mean_auc(lambda user, items: v[items] @ u[row[int(user)]])
 
     best_recall = -1.0
     best_val = float("inf")
@@ -548,14 +566,15 @@ def train(cfg):
                              optimizer=None, objective=objective,
                              temperature=temperature, positives=positives)
         recall = probe.recall_at_k(model, features, device)
+        val_auc = sm_auc()
         elapsed = time.time() - t0
         history.append({"epoch": epoch, "train_loss": train_loss,
                         "val_loss": val_loss, "val_recall@10": recall[10],
-                        "val_recall@200": recall[200]})
+                        "val_recall@200": recall[200], "small_val_auc": val_auc})
 
         marker = ""
-        if recall[10] > best_recall:
-            best_recall = recall[10]
+        if val_auc > best_recall:
+            best_recall = val_auc
             best_val = val_loss
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             best_epoch = epoch
@@ -566,7 +585,8 @@ def train(cfg):
 
         print(f"Epoch {epoch}/{epochs} — train: {train_loss:.4f} — "
               f"val: {val_loss:.4f} — val recall@10: {recall[10]:.5f} — "
-              f"val recall@200: {recall[200]:.5f} — {elapsed:.1f}s{marker}",
+              f"val recall@200: {recall[200]:.5f} — small val AUC: {val_auc:.4f} — "
+              f"{elapsed:.1f}s{marker}",
               flush=True)
 
         if epochs_without_improvement >= patience:
@@ -576,7 +596,7 @@ def train(cfg):
     # Everything downstream must come from the best model, not the last one.
     model.load_state_dict(best_state)
     print(f"Restored best model from epoch {best_epoch} "
-          f"(val recall@10 {best_recall:.5f}, val loss {best_val:.4f})")
+          f"(small_matrix val AUC {best_recall:.4f}, val loss {best_val:.4f})")
 
     import json
     from datetime import datetime, timezone
@@ -584,9 +604,9 @@ def train(cfg):
         "objective": objective,
         "temperature": temperature if objective == "infonce" else None,
         "best_epoch": best_epoch,
-        "best_val_recall_at_10": best_recall,
+        "best_small_val_auc": best_recall,
         "best_val_loss": best_val,
-        "selected_on": "val_recall@10",
+        "selected_on": "small_matrix_val_per_user_auc (docs/evaluation_protocol.md v2)",
         "history": history,
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
