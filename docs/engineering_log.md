@@ -371,6 +371,130 @@ A bucket-level check averaged it away.
 
 ---
 
+## 18. Phase 2, Phase 0: KuaiRand audit and signal gate — NO-GO
+
+Plan: `docs/phase2_kuairand_plan.md` (see its "Phase 0 amendments"). Code:
+`scripts/audit_kuairand.py`, `scripts/gate_kuairand.py`, `data/kuairand.py`,
+`evaluation/gauc.py`.
+
+**Question.** Does engagement carry learnable personal preference once exposure
+and duration are controlled?
+- Train on KuaiRand-Pure's recommender-exposed standard log (4/09–4/21).
+- Evaluate on its random-exposure log (4/22–5/08).
+- Metric: per-user AUC (GAUC), validation users only (8,147 of 27,285; test
+  users untouched).
+
+**What the audit changed before the gate**
+- The README's `is_click` = valid_play rule is not exact in any tab.
+  Two-column tabs were re-identified by zero play time on unclicked
+  impressions. The random log is 99.3% single-column tab 1, so **two-column
+  click is not evaluable**.
+- **Explicit feedback is sparse on random exposure.** Like rate is 0.48% vs
+  1.87% on recommended items.
+
+  | label | validation users with both classes |
+  |---|---|
+  | like | 705 |
+  | composite `explicit_positive` | 875 |
+  | follow, comment, forward | 77–108 |
+  | hate | 139 |
+
+  The pre-registered half-width rule left the composite as the only gate label.
+- **Data problems**
+  - Duplicate rows: 15,609 exact, plus ~1K sharing (user, video, time).
+  - The log is front-loaded (4/10–4/12 hold 58% of rows).
+  - 239 items have unknown duration: `video_duration` is NaN and `duration_ms`
+    is 0 on every log row.
+  - `upload_dt` has three values.
+
+**Gate design.** Pre-registered in the script docstring and committed
+(`50aae84`) before the validation run. A fresh-context AI-agent review of the
+design replaced three things before any validation run:
+- noisy early stopping → 300 fixed rounds;
+- 94K fit rows → 344K via expanding daily cutoffs;
+- raw-count features → shares.
+
+It also fixed a crash in the duration-band baseline.
+
+**Result**
+
+Run 3 is final. Runs 1–2 had duration bugs, disclosed below.
+
+| label | users | personal LightGBM | best non-personal | diff (95% CI) |
+|---|---|---|---|---|
+| **explicit_positive (gate)** | 875 | 0.541 | shortest-first 0.553 | −0.012 (−0.033, +0.010) |
+| | | | item impressions 0.541 | 0.000 |
+| like | 705 | 0.557 | shortest-first 0.555 | +0.002 (−0.020, +0.024) |
+| valid play (`is_click`) | 6,798 | 0.577 | item impressions 0.568 | +0.0095 (+0.0045, +0.0145) |
+| long view | 5,485 | 0.602 | item impressions 0.596 | +0.006 (−0.001, +0.012) |
+
+- **Gate verdict: NO-GO** in all three runs and in the tab-1 sensitivity
+  check. It does not depend on duration: the personal model also only ties
+  item impression count.
+- **The rare labels are too thin to conclude.** On follow and comment (77–80
+  users) the personal model is *below* shortest-first (about −0.10, CIs
+  excluding 0).
+- **Valid play and long view are watch-time thresholds, not gated.** The
+  personal gains there are real, but below the pre-set 0.01 bar.
+- **Power.** 70% of gate users have a single positive, and the personal and
+  impressions per-user AUCs correlate −0.26 (run 1), so the CI is ±0.02–0.03. The
+  claim is "no gain above about 0.03 detected", not "no personal signal".
+
+**Post-hoc finding: signs flip between logs.** This was a fresh-context
+AI-agent diagnostic on validation users, and it cannot change the verdict.
+
+| single feature | label | standard log | random log |
+|---|---|---|---|
+| item impression share | explicit feedback | 0.44 | 0.54 |
+| author impression share | explicit feedback | 0.45 | 0.54 |
+| user's tag share | explicit feedback | 0.47 | 0.51 |
+| item's own like rate | like | 0.65 | 0.55 |
+| duration | explicit feedback | 0.45 | 0.44 |
+
+- Popularity and familiarity reverse. Among items the recommender already
+  chose, heavily pushed items and familiar tags get *fewer* likes; across the
+  catalogue they get more.
+- An item's own like rate weakens, and duration is stable.
+- The run-1 trained model's scores correlate −0.15 with impressions on
+  random items. This is consistent with models trained on exposed logs learning
+  exposure artefacts. On watch-time labels nothing flips; the features just
+  get stronger.
+- The non-personal LightGBM scores below a raw impression count on every
+  label (e.g. valid play 0.548 vs 0.568).
+
+**Bugs caught by the process**
+
+*Run 1.* NaN durations for 239 items corrupted the shortest-first per-user
+AUCs.
+- Pandas `rank` leaves NaN unranked, and the audit's
+  `abs(a - b) > 1000` check is false for NaN, so it reported 0 mismatches.
+- `per_user_auc` now rejects NaN.
+
+*Run 2.* Filled those durations from the logs, which were all 0. That made
+them the "shortest" videos. A second AI-agent review caught it.
+
+*Run 3.* Treats the duration as unknown:
+- NaN for LightGBM;
+- its own duration band;
+- the median duration in the duration baselines.
+
+All three runs' JSON outputs are kept in `datastore/processed/`. The
+per-item duration fill in run 2 used all logs, including test users' rows.
+That is a fixed item property, so nothing leaked.
+
+**Disclosure.** The audit's duration table scored all random-log users,
+including test users, with fixed shortest-first. No model or tuned scorer
+touched test users.
+
+**What is claimable.** Two datasets and two label types now agree under
+exposure-unbiased, pre-registered tests:
+- personalised models trained on logged data do not beat simple non-personal
+  scorers (duration, exposure count) at a detectable margin;
+- features learned on exposed logs can point the wrong way on random
+  exposure.
+
+---
+
 ## How a pair is labelled
 
 *"How do you decide one item is better than another?"* — the model never

@@ -1,7 +1,9 @@
 # Phase 2 NO-GO chapter (pre-drafted)
 
 **Status:** drafted 2026-09-15, before the Phase 0 gate was run on validation
-users. The plan requires a null-result write-up before the gate, so the outcome
+users. **The gate returned NO-GO**; figures filled from run 3, the final run
+(engineering log §18). Corrections to the draft's own pre-run claims are
+marked *[corrected]*. The plan requires a null-result write-up before the gate, so the outcome
 cannot shape the framing. If the gate says GO, this file is kept as a record and
 not used.
 
@@ -26,14 +28,15 @@ carries personal preference once exposure and duration are controlled.
 - GO requires a Holm-significant gain of at least 0.01 on the gate label.
 
 **Result.** On `explicit_positive` (like, follow, comment or forward), across
-[n] users:
+875 users:
 
 | scorer | GAUC |
 |---|---|
-| personalised model | [x] |
-| best non-personal: [name] | [y] |
+| personalised model | 0.541 |
+| best non-personal: shortest-first | 0.553 |
+| item impression count | 0.541 |
 
-The difference is [d], 95% CI [lo, hi], so the gate is **NO-GO**.
+The difference is −0.012, 95% CI −0.033 to +0.010, so the gate is **NO-GO**.
 
 **What limits the conclusion**
 - **Positives are sparse on random exposure.**
@@ -41,13 +44,14 @@ The difference is [d], 95% CI [lo, hi], so the gate is **NO-GO**.
     recommended ones.
   - Only 705 of 8,147 validation users have both a liked and an unliked
     random video; follow, comment and forward have 77–108 such users.
-  - Per-user AUC has a standard deviation of about 0.28 across ~875 users, so
-    the paired standard error is about 0.007–0.010. A significant result needs
-    a gain of roughly 0.014–0.019, and power is about 50–85% at a true gain of
-    0.02 and 30% or less at 0.01. NO-GO means no gain above about 0.02 was
-    detected, not that no personal signal exists.
+  - *[corrected]* The pre-run estimate of the paired standard error was
+    0.007–0.010. Measured, it is about 0.011–0.015: 70% of users have a single
+    positive, and the personal and impressions per-user AUCs are negatively
+    correlated. NO-GO means no gain above about 0.03 was detected, not that no
+    personal signal exists.
 - **Duration is still a strong non-personal signal.** Shortest-first alone
-  reaches GAUC 0.571 on likes.
+  reaches GAUC 0.555 on likes for validation users *[corrected: the draft's 0.571
+  included unknown-duration items as duration 0]*.
 - **The training log is small and front-loaded**, with 343,892 labelled
   rows (expanding daily cutoffs, 4/13–4/20).
 

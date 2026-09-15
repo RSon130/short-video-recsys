@@ -59,6 +59,20 @@ Amendments (2026-09-15, before any validation run)
   * Raw-count features replaced by shares; item statistics on single-column
     rows; newest-first and item age dropped; dedup on (user, video, time_ms).
 
+Bug-fix re-runs (after run 1, disclosed; verdict rule unchanged)
+  Run 1 (design commit 50aae84): NO-GO. A fresh-context AI-agent review of the
+  result surfaced that video_features_basic has NaN video_duration for 239
+  items (3.1% of random rows). NaN scores corrupted the shortest- and
+  longest-first per-user AUCs.
+  Run 2 filled those durations from the logs, but every log row for those
+  items has duration_ms == 0, so it filled 0 and made them "shortest".
+  Caught by a second AI-agent review. NO-GO.
+  Run 3 (this code): duration is unknown for those items. NaN for LightGBM,
+  own duration band (-1), median item duration in the duration baselines,
+  play ratio NaN where duration_ms == 0. per_user_auc rejects NaN.
+  All runs are kept: kuairand_gate_run1_nan_duration.json,
+  kuairand_gate_run2_zero_duration.json, kuairand_gate.json.
+
 Usage
   python scripts/gate_kuairand.py --fit-only   # train + 4/21 diagnostic; no validation rows
   python scripts/gate_kuairand.py              # full gate
@@ -107,8 +121,11 @@ def item_table(basic: pd.DataFrame) -> pd.DataFrame:
     b["n_tags"] = tags.str.count(",") + (tags != "").astype(int)
     b["video_type_c"] = b["video_type"].astype("category").cat.codes
     b["upload_type_c"] = b["upload_type"].astype("category").cat.codes
-    b["dur_band"] = pd.qcut(b["log_dur"].rank(method="first"), 5, labels=False)
-    b["dur_band20"] = pd.qcut(b["log_dur"].rank(method="first"), 20, labels=False)
+    # Unknown duration (239 items) stays NaN for LightGBM and gets its own band, -1.
+    known = b["log_dur"].notna()
+    b["dur_band"], b["dur_band20"] = -1, -1
+    b.loc[known, "dur_band"] = pd.qcut(b.loc[known, "log_dur"].rank(method="first"), 5, labels=False)
+    b.loc[known, "dur_band20"] = pd.qcut(b.loc[known, "log_dur"].rank(method="first"), 20, labels=False)
     return b[["video_id", "author_id", "duration_s", "log_dur", "tag_first", "n_tags", "video_type_c",
               "upload_type_c", "music_type", "dur_band", "dur_band20"]]
 
@@ -126,7 +143,7 @@ def build_features(hist: pd.DataFrame, rows: pd.DataFrame, items: pd.DataFrame, 
                    single_col: list) -> tuple[pd.DataFrame, list, list]:
     """Features for `rows` from `hist` only. Returns (X, nonpersonal_cols, personal_cols), row-aligned."""
     h = hist.merge(items[["video_id", "author_id", "tag_first", "dur_band", "log_dur"]], on="video_id", how="left")
-    h["play_ratio"] = (h["play_time_ms"] / h["duration_ms"].clip(lower=1)).clip(0, 5)
+    h["play_ratio"] = (h["play_time_ms"] / h["duration_ms"].where(h["duration_ms"] > 0)).clip(0, 5)
     h1 = h[h["tab"].isin(single_col)]
     priors = {c: h1[c].mean() for c in RATE_LABELS}
     upriors = {c: h[c].mean() for c in RATE_LABELS}
@@ -200,10 +217,12 @@ def baseline_scores(hist1: pd.DataFrame, X: pd.DataFrame, label: str) -> dict:
     cnt = items.map(hi["count"]).fillna(0).to_numpy()
     pos = items.map(hi["sum"]).fillna(0).to_numpy()
     band_prior = X["dur_band20"].map(hist1.groupby("dur_band20")[label].mean()).fillna(prior).to_numpy()
+    # unknown duration gets a neutral value: the median known item duration
+    dur = X["duration_s"].fillna(X["duration_s"].median()).to_numpy()
     return {"item_rate": (pos + 20 * prior) / (cnt + 20),
             "item_rate_duration_band": (pos + 20 * band_prior) / (cnt + 20),
-            "shortest_first": -X["duration_s"].to_numpy(),
-            "longest_first": X["duration_s"].to_numpy(),
+            "shortest_first": -dur,
+            "longest_first": dur,
             "item_impressions": cnt}
 
 

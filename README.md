@@ -69,6 +69,30 @@ gradient. Full analysis: [engineering log §15–§17](docs/engineering_log.md).
 | Label fully duration-controlled | ⚠️ not within the widest bucket; protocol v3 needed |
 | Deployed service | ⚠️ still runs an older model; not updated, since no model beats the baselines |
 
+## Phase 2: KuaiRand (in progress)
+
+KuaiRec's only label, watch time, mostly measured video length. **KuaiRand**,
+from the same group, adds explicit feedback (like, follow, comment, forward,
+hate) and a log of randomly exposed videos. Phase 2 asks whether engagement
+carries learnable personal preference once exposure and duration are
+controlled. Plan: [docs/phase2_kuairand_plan.md](docs/phase2_kuairand_plan.md).
+
+**Phase 0 gate: NO-GO.** The gate was pre-registered and reviewed before it
+ran:
+- **Setup:** a personalised LightGBM trained on the recommender-exposed log
+  4/09–4/21, evaluated on validation users' random-exposure rows 4/22–5/08.
+- **Explicit feedback (like, follow, comment or forward, 875 users):**
+  per-user AUC 0.541, vs 0.553 for ranking shorter videos first and 0.541 for
+  item impression count.
+- **Watch-time thresholds (~6K users):** it beats impression count by
+  +0.006 to +0.0095, below the pre-set 0.01 bar.
+- **Post hoc:** popularity and tag-familiarity features predict *fewer* likes
+  among exposed items but *more* across the catalogue. Models trained on
+  exposed logs can learn exposure artefacts.
+- **Caught before reporting:** a duration bug, twice, by the review process.
+
+Details: [engineering log §18](docs/engineering_log.md).
+
 ## Dataset
 
 | | `small_matrix` (evaluation) | `big_matrix` (training) |
@@ -243,7 +267,7 @@ docs/            engineering_log.md   what broke, how it was found, what it meas
 
 ## Stack
 
-PyTorch · FAISS · FastAPI · Docker · GCP Cloud Run · pandas/NumPy · pytest (207 tests)
+PyTorch · FAISS · FastAPI · Docker · GCP Cloud Run · pandas/NumPy · pytest (212 tests)
 
 ## Next
 

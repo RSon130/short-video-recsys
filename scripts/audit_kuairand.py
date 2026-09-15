@@ -28,7 +28,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
-from data.kuairand import LABELS, long_view_rule, read_log, read_video_basic, valid_play
+from data.kuairand import LABELS, find_file, long_view_rule, read_log, read_video_basic, valid_play
 from evaluation.gauc import bootstrap_mean, per_user_auc, users_with_both_classes
 from evaluation.small_matrix import split_users
 
@@ -89,6 +89,7 @@ def tab_audit(df):
 
 def duration_audit(df, n_buckets=20):
     """Positive rate by duration bucket, and the gradient left *within* buckets."""
+    df = df[df["duration_ms"] > 0]   # 239 items have duration_ms == 0 (unknown); excluded
     d = df.assign(bucket=pd.qcut(df["duration_ms"].rank(method="first"), n_buckets, labels=False))
     res = {}
     for c in ALL_LABELS:
@@ -134,8 +135,12 @@ def main():
         "random_items_missing_basic_features": len(items["random"] - set(basic["video_id"])),
         "random_rows_also_in_standard_late_same_time": int(rnd.merge(late[["user_id", "video_id", "time_ms"]],
                                                                    on=["user_id", "video_id", "time_ms"]).shape[0]),
-        "duration_ms_vs_basic_mismatch_frac": round(float(
-            (rnd.merge(basic[["video_id", "video_duration"]], on="video_id")
+        # NaN-safe: the first version compared with NaN and reported 0.
+        "random_rows_duration_ms_zero": int((rnd["duration_ms"] == 0).sum()),
+        "basic_video_duration_missing_items_raw": int(pd.read_csv(
+            find_file("video_features_basic_pure.csv"))["video_duration"].isna().sum()),
+        "duration_ms_vs_basic_mismatch_frac_known": round(float(
+            (rnd.merge(basic[["video_id", "video_duration"]], on="video_id").dropna(subset=["video_duration"])
              .pipe(lambda x: (x["duration_ms"] - x["video_duration"]).abs() > 1000)).mean()), 4),
     }
     per_user = rnd.groupby("user_id").size()

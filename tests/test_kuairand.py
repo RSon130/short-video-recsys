@@ -41,3 +41,9 @@ def test_bootstraps_bracket_the_mean():
     assert np.isclose(r["diff"], 0.02) and r["ci_low"] - 1e-9 <= 0.02 <= r["ci_high"] + 1e-9 and r["p"] <= 0.01
     m = bootstrap_mean(a, n_boot=500)
     assert m["ci_low"] < m["mean"] < m["ci_high"]
+
+
+def test_per_user_auc_rejects_nan_scores():
+    import pytest
+    with pytest.raises(ValueError):
+        per_user_auc(np.array([0, 0]), np.array([1, 0]), np.array([np.nan, 1.0]))

@@ -1,6 +1,6 @@
 # Phase 2 plan: KuaiRand
 
-**Status:** approved 2026-09-15. Phase 0 is in progress; see "Phase 0 amendments". The plan was reviewed by a
+**Status:** approved 2026-09-15. **Phase 0 gate: NO-GO** (engineering log §18). The next step awaits the user's decision; see "Phase 0 amendments". The plan was reviewed by a
 fresh-context AI agent before approval. Its corrections are folded in and listed
 at the end.
 

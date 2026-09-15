@@ -13,7 +13,13 @@ import pandas as pd
 
 
 def per_user_auc(users: np.ndarray, labels: np.ndarray, scores: np.ndarray) -> pd.Series:
-    """AUC per user (index = user id); users with one class are omitted."""
+    """AUC per user (index = user id); users with one class are omitted.
+
+    NaN scores are rejected: rank() leaves them unranked, which silently
+    corrupts the AUC of every user who has one.
+    """
+    if np.isnan(np.asarray(scores, dtype=float)).any():
+        raise ValueError("per_user_auc: scores contain NaN")
     df = pd.DataFrame({"u": np.asarray(users), "y": np.asarray(labels).astype(bool),
                        "s": np.asarray(scores, dtype=float)})
     df["r"] = df.groupby("u")["s"].rank(method="average")

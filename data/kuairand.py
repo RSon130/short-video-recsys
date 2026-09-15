@@ -71,6 +71,10 @@ def read_user_features(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
 
 
 def read_video_basic(raw_dir: Path = RAW_DIR) -> pd.DataFrame:
+    """video_features_basic. video_duration is NaN for 239 items, and every log
+    row for those items has duration_ms == 0 (no other item does), so their
+    duration is unknown and stays NaN. Callers must handle it explicitly;
+    per_user_auc rejects NaN scores."""
     return pd.read_csv(find_file("video_features_basic_pure.csv", raw_dir))
 
 
