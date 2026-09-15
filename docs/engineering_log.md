@@ -342,10 +342,45 @@ it. Both objectives stay selectable so the comparison is reproducible.
 > The comparisons in "The two findings worth discussing" predate §11: their
 > ranker results were measured on candidates from the collapsed retrieval model.
 
-- **Explain the ranker regression (§14)** — first. Check whether the ranker's
-  input distribution shifted with the new embeddings, and try logQ correction
-  in retrieval.
-- **Duration-debiased label (§12)**, as its own measured step.
+### Next experiment: logQ correction in retrieval (planned, not run)
+
+This applies to the **retrieval** stage's in-batch softmax only. The ranker's
+pairwise loss draws each negative from the *same user's* low-watch items rather
+than from other users' positives, so it has no in-batch sampling bias to correct.
+
+**The bias.** With in-batch softmax, a user's negatives are the other users'
+positives in the batch. An item therefore appears as a negative in proportion to
+its frequency among training positives, `Q(i)`. Popular items are pushed down
+far more often than niche ones, and the learned score drifts toward
+`true affinity − log Q(i)`: the model systematically under-scores popular items.
+
+**Why it is the lead hypothesis for §14.** Retrieval's watch-time AUC is 0.34,
+below chance, so its scores run against watch_ratio. Popular items on this
+dataset skew short and high-watch-ratio (§12), so an anti-popularity bias would
+produce exactly that sign. The ranker consumes retrieval embeddings, so the same
+bias could plausibly contribute to the −26% regression. Neither link is measured.
+
+**The change.** Subtract `log Q(i)` from every logit during training only,
+`logit(u, i) = u·i / τ − log Q(i)`, with `Q` counted once from training
+positives (Yi et al., RecSys 2019). Serving keeps the plain dot product, so the
+index and API do not change. About ten lines in `sampled_softmax_loss`.
+
+**What would falsify it.** Retrieval watch-time AUC staying at or below 0.5 after
+the change. **What it could cost.** Popularity is a strong signal here (it is
+the baseline), so removing the anti-popularity penalty can raise or lower
+recall@10; a scaled correction `α·log Q`, α in (0, 1], is the fallback if the
+full correction overshoots.
+
+**Protocol.** One change against the §14 run. Same seed, same recall-based
+checkpoint selection, full retrieval → index → ranker → evaluate, and both
+outcomes recorded here.
+
+### Other open items
+
+- **Explain the ranker regression (§14)** also needs a direct check, whatever
+  logQ shows: compare the ranker's input feature distributions under the
+  collapsed and the fixed embeddings.
+- **Duration-debiased label (§12)**, as its own measured step, after the above.
 
 - **Hard-negative mining** — the highest-value open item. Both unexplained
   results point at it: listwise gained nothing from more *easy* negatives, and
