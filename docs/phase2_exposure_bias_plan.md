@@ -234,9 +234,23 @@ stating that the study cannot resolve differences below the seed spread.
 
 ## References
 
-From memory; verify before any public citation.
-- Schnabel et al., "Recommendations as Treatments", ICML 2016.
-- Yang et al., "Unbiased Offline Recommender Evaluation for Missing-Not-At-Random
-  Implicit Feedback", RecSys 2018.
-- Bonner & Vasile, "Causal Embeddings for Recommendation", RecSys 2018.
-- Gao et al., "KuaiRand", CIKM 2022.
+Verified online 2026-09-16.
+
+- **IPS for recommendation:** Schnabel, Swaminathan, Singh, Chandak, Joachims,
+  "Recommendations as Treatments: Debiasing Learning and Evaluation", ICML 2016.
+  [arXiv 1602.05352](https://arxiv.org/abs/1602.05352)
+- **Popularity-based propensity:** Yang, Cui, Xuan, Wang, Belongie, Estrin,
+  "Unbiased Offline Recommender Evaluation for Missing-Not-At-Random Implicit
+  Feedback", RecSys 2018.
+  [doi:10.1145/3240323.3240355](https://doi.org/10.1145/3240323.3240355)
+- **Training on a uniformly exposed sample:** Bonner, Vasile, "Causal Embeddings
+  for Recommendation", RecSys 2018.
+  [arXiv 1706.07639](https://arxiv.org/abs/1706.07639),
+  [code](https://github.com/criteo-research/CausE)
+- **Dataset:** Gao et al., "KuaiRand: An Unbiased Sequential Recommendation
+  Dataset with Randomly Exposed Videos", CIKM 2022.
+  [arXiv 2208.08696](https://arxiv.org/abs/2208.08696)
+
+These are cited as prior work whose *ideas* the arms follow. No paper's
+architecture, protocol or splits were reproduced, and no result here is
+compared against a published number.

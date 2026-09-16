@@ -336,14 +336,30 @@ scorer touched test users. Future audits use validation users only.
 
 ## References
 
-The D2Q and WTG entries are from memory and have not been checked online. Verify
-the authors, titles and venues before citing them in the README or anywhere
-public.
+Verified online 2026-09-16 (titles, authors and venues checked against the
+publisher or arXiv page).
 
-- KuaiRand: Gao et al., CIKM 2022. [arXiv 2208.08696](https://arxiv.org/abs/2208.08696)
-- D2Q: Zhan et al., "Deconfounding Duration Bias in Watch-time Prediction for Video Recommendation", KDD 2022
-- WTG: Zheng et al., "DVR: Micro-Video Recommendation Optimizing Watch-Time-Gain under Duration Bias", ACM MM 2022
-- D2Co: "Uncovering User Interest from Biased and Noised Watch Time in Video Recommendation", RecSys 2023. [arXiv 2308.08120](https://arxiv.org/abs/2308.08120)
-- CWM: Zhao et al., "Counteracting Duration Bias in Video Recommendation via Counterfactual Watch Time", KDD 2024. [arXiv 2406.07932](https://arxiv.org/abs/2406.07932), [code](https://github.com/hyz20/CWM)
-- RAD: "Relative Advantage Debiasing for Watch-Time Prediction in Short-Video", [arXiv 2508.11086](https://arxiv.org/abs/2508.11086)
-- Ferrari Dacrema et al., "Are We Really Making Much Progress?", RecSys 2019. [arXiv 1907.06902](https://arxiv.org/abs/1907.06902v3)
+- **KuaiRand:** Gao, Li, Zhang, Chen, Li, Lei, Jiang, He, "KuaiRand: An Unbiased
+  Sequential Recommendation Dataset with Randomly Exposed Videos", CIKM 2022
+  (resource paper). [arXiv 2208.08696](https://arxiv.org/abs/2208.08696)
+- **D2Q:** Zhan, Pei, Su, Wen, Wang, Mu, Zheng, Jiang, Gai, "Deconfounding
+  Duration Bias in Watch-time Prediction for Video Recommendation", KDD 2022.
+  [arXiv 2206.06003](https://arxiv.org/abs/2206.06003),
+  [doi:10.1145/3534678.3539092](https://doi.org/10.1145/3534678.3539092)
+- **WTG / DVR:** Zheng, Gao, Ding, Yi, Jin, Li, Wang, "DVR: Micro-Video
+  Recommendation Optimizing Watch-Time-Gain under Duration Bias", ACM MM 2022.
+  [arXiv 2208.05190](https://arxiv.org/abs/2208.05190),
+  [code](https://github.com/tsinghua-fib-lab/WTG-DVR)
+- **D2Co:** Zhao, Zhang, Xu, Cai, Dong, Wen, "Uncovering User Interest from
+  Biased and Noised Watch Time in Video Recommendation", RecSys 2023.
+  [arXiv 2308.08120](https://arxiv.org/abs/2308.08120)
+- **CWM:** Zhao, Cai, Zhu, Dong, Xu, Wen, "Counteracting Duration Bias in Video
+  Recommendation via Counterfactual Watch Time", KDD 2024.
+  [arXiv 2406.07932](https://arxiv.org/abs/2406.07932),
+  [code](https://github.com/hyz20/CWM)
+- **RAD:** Liu, Han, Zhan, Zhao, Mu, Song, "Relative Advantage Debiasing for
+  Watch-Time Prediction in Short-Video Recommendation". **arXiv preprint, no
+  venue stated.** [arXiv 2508.11086](https://arxiv.org/abs/2508.11086)
+- Ferrari Dacrema, Cremonesi, Jannach, "Are We Really Making Much Progress? A
+  Worrying Analysis of Recent Neural Recommendation Approaches", RecSys 2019.
+  [arXiv 1907.06902](https://arxiv.org/abs/1907.06902)
