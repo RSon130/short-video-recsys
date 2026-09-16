@@ -67,6 +67,23 @@ class RecommendResponse(BaseModel):
     latency_ms: float
 
 
+class KuaiRandRequest(BaseModel):
+    user_id: int
+    top_k: int = Field(default=20, ge=1, le=100)
+    exclude_seen: bool = True
+
+
+class KuaiRandResponse(BaseModel):
+    user_id: int
+    recommendations: List[ItemScore]
+    scorer: str
+    scorer_note: str
+    catalogue_size: int
+    excluded_seen: int
+    known_user: bool
+    latency_ms: float
+
+
 class InteractionEvent(BaseModel):
     user_id: int
     item_id: int

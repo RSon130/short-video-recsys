@@ -1,0 +1,27 @@
+{
+ "scorer": "item_impressions",
+ "description": "Item impression count in the KuaiRand standard log 4/09-4/21, single-column tabs. Non-personal: the ranking is the same for every user; only the filter of already-seen items is per user.",
+ "why_this_scorer": "Pre-registered rule: deploy whichever scorer wins under the protocol, even a baseline. On held-out users the personalised LightGBM did not beat it by a material margin.",
+ "measured_on_held_out_users": {
+  "is_click": {
+   "item_impressions_gauc": 0.5747,
+   "personal_model_gauc": 0.5765,
+   "difference": 0.0008757661527778261,
+   "p": 0.5866,
+   "users": 16046
+  },
+  "long_view": {
+   "item_impressions_gauc": 0.5995,
+   "personal_model_gauc": 0.602,
+   "difference": 0.002073147222669784,
+   "p": 0.3244,
+   "users": 12858
+  }
+ },
+ "label_note": "is_click is KuaiRand's valid-play threshold, not a click.",
+ "metric": "per-user AUC on randomly exposed impressions, test users, scored once",
+ "protocol": "docs/phase2_exposure_bias_plan.md",
+ "catalogue_size": 7583,
+ "built_at": "2026-09-16T07:33:28+00:00",
+ "built_from_commit": "c21b44c"
+}

@@ -16,11 +16,13 @@ import torch
 from fastapi import FastAPI, HTTPException
 
 from config_loader import load_config
-from data.schema import RecommendRequest, RecommendResponse, ItemScore
+from data.schema import (ItemScore, KuaiRandRequest, KuaiRandResponse, RecommendRequest,
+                         RecommendResponse)
 from features.dense_features import DenseFeatureStore
 from models.two_tower import build_model
 from models.ranker import build_ranker
 from retrieval.faiss_index import query_index, load_index
+from serving.kuairand_scorer import KuaiRandScorer
 
 _cfg = None
 _index = None
@@ -31,6 +33,8 @@ _ranker = None
 _features = None        # DenseFeatureStore — shared with training/eval
 _inv_item_map = None    # internal item index -> original dataset item_id
 _cache: dict = {}   # user_id -> (RecommendResponse, expiry_float)
+_kuairand = None        # KuaiRandScorer — the scorer phase 2 deploys
+_kuairec_error = None   # why the KuaiRec two-stage path is unavailable, if it is
 
 logger = logging.getLogger("recsys.api")
 
@@ -92,8 +96,21 @@ async def startup():
         ],
     )
 
-    _load_artifacts(_cfg)
-    logger.info("API startup complete — %d users, %d items", _id_maps["n_users"], _id_maps["n_items"])
+    global _kuairand, _kuairec_error
+    _kuairand = KuaiRandScorer()
+    logger.info("KuaiRand scorer loaded — %s, %d items",
+                _kuairand.meta["scorer"], _kuairand.catalogue_size)
+
+    # The phase 1 (KuaiRec) two-stage path is optional: phase 2 deploys the
+    # KuaiRand scorer, and the deploy image does not carry the phase 1
+    # artifacts. Missing artifacts degrade /recommend, they do not fail startup.
+    try:
+        _load_artifacts(_cfg)
+        logger.info("KuaiRec artifacts loaded — %d users, %d items",
+                    _id_maps["n_users"], _id_maps["n_items"])
+    except Exception as exc:                       # noqa: BLE001 - reported, not raised
+        _kuairec_error = f"{type(exc).__name__}: {exc}"
+        logger.warning("KuaiRec two-stage path unavailable: %s", _kuairec_error)
 
 
 def _get_cache(user_id: int) -> RecommendResponse | None:
@@ -124,11 +141,48 @@ def _set_cache(user_id: int, response: RecommendResponse) -> None:
 @app.get("/health")
 def health() -> dict:
     """
-    Liveness probe — returns {"status": "ok"} when the server is running.
-    Used by load balancers and container orchestrators (e.g. Kubernetes) to
-    determine whether the instance should receive traffic.
+    Liveness probe. Also reports which scoring paths are actually loaded, so a
+    degraded instance is visible rather than silently serving one endpoint.
     """
-    return {"status": "ok"}
+    return {"status": "ok",
+            "kuairand_scorer": _kuairand.meta["scorer"] if _kuairand else None,
+            "kuairec_two_stage": _kuairec_error is None,
+            "kuairec_error": _kuairec_error}
+
+
+@app.post("/recommend/kuairand")
+async def recommend_kuairand(request: KuaiRandRequest) -> KuaiRandResponse:
+    """
+    Rank the KuaiRand catalogue for a user with the scorer phase 2 deployed.
+
+    That scorer is a non-personal item impression count. Under the
+    pre-registered protocol no model arm beat it by a material margin on
+    held-out users, and the rule was to deploy whichever scorer won. The
+    response carries the scorer's identity so the choice is visible to whoever
+    calls it; /scorer returns the measured numbers behind it.
+    """
+    start = time.perf_counter()
+    if _kuairand is None:
+        raise HTTPException(status_code=503, detail="KuaiRand scorer not loaded")
+    items, excluded = _kuairand.top_k(request.user_id, request.top_k, request.exclude_seen)
+    return KuaiRandResponse(
+        user_id=request.user_id,
+        recommendations=[ItemScore(item_id=i, score=s, rank=r) for r, (i, s) in enumerate(items, 1)],
+        scorer=_kuairand.meta["scorer"],
+        scorer_note=_kuairand.meta["why_this_scorer"],
+        catalogue_size=_kuairand.catalogue_size,
+        excluded_seen=excluded,
+        known_user=len(_kuairand.seen_items(request.user_id)) > 0,
+        latency_ms=(time.perf_counter() - start) * 1000,
+    )
+
+
+@app.get("/scorer")
+def scorer() -> dict:
+    """What is deployed and what it measured — the provenance of the ranking."""
+    if _kuairand is None:
+        raise HTTPException(status_code=503, detail="KuaiRand scorer not loaded")
+    return _kuairand.meta
 
 
 @app.post("/recommend", responses={404: {"description": "Unknown user_id"}})
@@ -161,6 +215,13 @@ async def recommend(request: RecommendRequest) -> RecommendResponse:
         HTTPException(404): if user_id is not in the training ID map.
     """
     t0 = time.perf_counter()
+
+    if _kuairec_error is not None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"The phase 1 (KuaiRec) two-stage path is not loaded on this instance "
+                   f"({_kuairec_error}). Phase 2 deploys the KuaiRand scorer: "
+                   f"use POST /recommend/kuairand.")
 
     cached = _get_cache(request.user_id)
     if cached is not None:

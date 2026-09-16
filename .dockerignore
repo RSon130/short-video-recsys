@@ -9,12 +9,14 @@ checkpoints/
 .env
 *.egg-info
 
-# Raw CSVs (~1.5 GB) and the interaction parquets are training inputs only.
+# Training inputs and analysis outputs never belong in an image.
+# datastore/processed/ now holds phase 2 analysis artifacts as well as the
+# phase 1 model files — the phase 2b score dump alone is 615 MB, and copying it
+# made the deploy image 2.3 GB.
 datastore/raw/
-datastore/processed/interactions/
+datastore/processed/
 datastore/processed_small/
-datastore/processed/evaluation_results.json
 
-# The remaining artifacts in datastore/processed/ — embeddings, FAISS index,
-# ranker weights, id maps, feature tables — total ~10 MB and are deliberately
-# NOT excluded: the deploy stage bakes them into the image. See Dockerfile.cpu.
+# datastore/serving/ (~2 MB: the item table and per-user seen index) is
+# deliberately NOT excluded — the deploy stage bakes it into the image.
+# See Dockerfile.cpu.

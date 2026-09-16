@@ -42,16 +42,20 @@ COPY requirements-dev.txt .
 RUN pip install --no-cache-dir -r requirements-dev.txt
 
 
-# Deploy stage — runtime plus the trained artifacts, for Cloud Run.
+# Deploy stage — runtime plus the artifacts the deployed scorer needs.
 #
-# The artifacts total ~10 MB (embeddings 4.3, FAISS index 2.5, ranker 0.4,
-# feature tables 2.3), so they ship inside the image rather than being pulled
-# from object storage at startup. That removes a bucket, a service account, a
-# set of credentials, and the failure mode where the service starts without a
-# model. The original design doc specified GCS for artifacts; at this size
-# that trade does not pay. It would once a rebuild per retrain becomes painful.
+# Phase 2 deploys the KuaiRand scorer (item impression count; see
+# docs/phase2_exposure_bias_plan.md), so only datastore/serving/ ships: an item
+# table and a per-user seen-items index, about 2 MB.
+#
+# The whole of datastore/processed/ used to be copied. That directory now also
+# holds analysis outputs — the phase 2b score dump alone is 615 MB — so copying
+# it wholesale would put hundreds of megabytes of research artifacts into a
+# serving image. The phase 1 (KuaiRec) two-stage path is therefore absent here;
+# the API reports it as unavailable and /recommend returns 503 pointing at
+# /recommend/kuairand.
 FROM runtime AS deploy
-COPY datastore/processed/ /app/datastore/processed/
+COPY datastore/serving/ /app/datastore/serving/
 
 # Cloud Run injects PORT and expects the container to listen on it.
 ENV PORT=8080
