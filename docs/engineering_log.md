@@ -495,6 +495,138 @@ exposure-unbiased, pre-registered tests:
 
 ---
 
+## 19. Phase 2b: exposure bias, run once on held-out users
+
+Pre-registered in `docs/phase2_exposure_bias_plan.md`, committed (`1ea2e90`)
+before the run. Code: `scripts/exposure_bias_kuairand.py`. Two fresh-context
+AI-agent reviews ran before the experiment (design, then code) and one after
+(results). Test users were scored exactly once.
+
+**Setup.** Train on KuaiRand's recommender-exposed standard log (4/09–4/21) or
+on randomly exposed rows; evaluate per-user AUC on **test users'** random-
+exposure rows (4/22–5/08, tabs 1–2): 16,046 users for valid play, 12,858 for
+long view. Labels are KuaiRand's thresholds: `is_click` is **valid play**, not
+a click.
+
+| arm | training data |
+|---|---|
+| A0 | exposed log, 343,892 rows (the Phase 0 model) |
+| A1 | A0 reweighted by inverse item popularity, `p^(-1/2)` |
+| A2 | A0 without the six exposure-volume features |
+| A3 | validation users' random rows, 352,477 |
+| A0′ | validation users' **exposed** rows, same users and window, 77,184 |
+| A3s | A3 subsampled to 77,184, matching A0′ |
+| N1 | non-personal: item impression count, exposed log |
+| N3 | non-personal: item positive rate from validation users' random rows |
+
+### Result 1: the sign flip replicates on untouched users
+
+Single feature, no model, standard fit rows vs test users' random rows:
+
+| feature | label | exposed log | random exposure | difference |
+|---|---|---|---|---|
+| item impression share | explicit feedback | 0.441 | 0.548 | +0.107 (CI +0.092, +0.122) |
+| author impression share | explicit feedback | 0.442 | 0.543 | +0.101 |
+| item impression share | like | 0.428 | 0.546 | +0.117 |
+| user's tag share | explicit feedback | 0.471 | 0.507 | +0.036 |
+
+- Among the items the recommender chose to show, exposure volume ranks explicit
+  engagement **below chance**. Across randomly shown items it ranks **above**
+  chance. Targeted exposure is a selection effect, not evidence that popular
+  videos repel users.
+- On the watch-time labels nothing flips; the same features simply get
+  stronger under random exposure.
+- `utag_share` on likes moved in the same direction but stayed below 0.5, so by
+  the pre-registered rule that one is **not** a flip.
+- The two sides differ in history window and row population as well as in
+  exposure, so the size of the shift is not a clean causal estimate. Its
+  direction agrees with the validation-set finding in §18.
+
+### Result 2: none of the three standard corrections helped
+
+| comparison | valid play | long view | verdict |
+|---|---|---|---|
+| H1 inverse-popularity weighting vs A0 | −0.0013 | +0.0008 | no material difference |
+| H2 drop exposure features vs A0 | −0.0057 | −0.0090 | significantly **worse** |
+| H5 A0 vs impression count | +0.0009 (p 0.59) | +0.0021 (p 0.32) | **did not replicate** |
+
+- **A1 behaved as designed.** The weights are deliberately under-corrected
+  (effective sample size 59.7%), and item popularity is a crude stand-in for
+  the real logging policy.
+- **A2 is mildly informative:** the exposure-volume features are net useful
+  under random exposure *despite* flipping sign, so the flip is not fixed by
+  deleting them.
+- **§18's +0.0095 valid-play gain over impression count is superseded and
+  should not be cited again.** On held-out users it is +0.0009, about 2.8 SE
+  away, too far for noise alone. The model barely moved (0.577 → 0.576); the
+  **comparator** rose (0.568 → 0.575). The mechanism is selective emphasis: of
+  four labels, valid play was the one whose validation CI excluded zero, and it
+  became the narrative.
+
+### Result 3: what the training distribution is beat how much of it there is
+
+The only pre-registered claims. Users, window, feature snapshot and row count
+are matched; only the exposure mechanism differs:
+
+| | valid play | long view |
+|---|---|---|
+| A3s, trained on 77K random rows | 0.6400 | 0.6658 |
+| A0′, trained on 77K exposed rows | 0.5850 | 0.6095 |
+| difference | **+0.0550** (CI +0.052, +0.058) | **+0.0563** (CI +0.053, +0.060) |
+
+It survives the duration guard (+0.052, +0.042), holds across three seeds, and
+A3s wins with **2.8× fewer positives** (13,578 vs 38,023).
+
+**What it does not mean.** The post-hoc results review bounded this hard:
+- **It is not personalisation.** A3s does not beat N3, the non-personal item
+  rate from the same rows: −0.0056 and −0.0019. Splitting A3s into a per-item
+  mean and a within-item residual gives 0.629 of its 0.640 from the item mean
+  alone; the within-item part, 0.542, is barely above A0′'s 0.532. Demeaning
+  both arms within N3 deciles shrinks the gap from +0.055 to +0.026.
+- **It reverses on exposed data.** On the 4/21 exposed diagnostic, A3s scores
+  0.548 against A0′'s 0.602. Each arm wins on the distribution it was trained
+  on, so this measures **train/evaluation distribution match**, not model
+  quality.
+- **It is not deployable.** A3, A3s, A0′ and N3 all use data from the
+  evaluation window.
+- On the explicit-feedback labels the same contrast is *negative* and not
+  significant (−0.013), so it does not generalise across label types.
+
+### Other pre-registered outcomes
+
+- **H4, personal model vs the unbiased item rate:** +0.0057 and +0.0131,
+  significant but **fails the duration guard** (+0.0014, +0.0007), so no claim.
+  The margin over an item rate is essentially duration. The guard is
+  conservative — it also removes genuine duration-correlated preference — and a
+  null here does not refute personalisation in general, only at this power.
+- **Secondary labels** (2,016 and 1,649 users) resolve nothing below about
+  0.03.
+- **N3 beats N1 on watch labels** (0.646 vs 0.575) but *loses* on explicit
+  feedback (0.516 vs 0.549). That is estimator noise, not a finding: with 1,927
+  explicit positives across 352K rows, smoothing collapses 7,530 items into 185
+  distinct values, so N3 is nearly constant there.
+
+### Caveats carried
+
+- `is_click` is valid play, a watch-time threshold.
+- The random log is uniform over a **platform-selected candidate pool**, not the
+  whole corpus.
+- A0/A1/A2 use expanding-history features while A0′/A3/A3s use the
+  evaluation-window snapshot, so A0′ vs A0 is not a like-for-like comparison of
+  data volume.
+- A2's drop list was chosen after the validation diagnostic.
+- No policy-value or online-lift claims: everything here is offline ranking on
+  logged data.
+
+### What this adds
+
+- A replicated, model-free demonstration of exposure bias on held-out users.
+- Evidence that two common corrections do not fix it, and that matching the
+  training distribution does far more than either.
+- A result that did not replicate, caught by holding out users and running once.
+
+---
+
 ## How a pair is labelled
 
 *"How do you decide one item is better than another?"* — the model never

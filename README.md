@@ -91,7 +91,24 @@ ran:
   exposed logs can learn exposure artefacts.
 - **Caught before reporting:** a duration bug, twice, by the review process.
 
-Details: [engineering log §18](docs/engineering_log.md).
+**Phase 2b: exposure bias, run once on 16,046 held-out users**
+([pre-registration](docs/phase2_exposure_bias_plan.md)).
+
+- **The sign flip replicates.** How often the recommender showed an item ranks
+  explicit engagement *below* chance among the items it chose (0.441) and
+  *above* chance under random exposure (0.548), a shift of +0.107.
+- **Neither standard correction helped.** Inverse-popularity weighting changed
+  nothing (−0.001); dropping exposure-volume features made ranking worse
+  (−0.006 to −0.009).
+- **Matching the training distribution did.** With users, window, features and
+  row count matched, training on randomly exposed rows beat training on
+  exposed rows by **+0.055** per-user AUC — with 2.8× fewer positives. But that
+  arm does not beat a plain item rate, and the ordering reverses on exposed
+  data, so it measures train/evaluation match, not a better model.
+- **A Phase 0 result did not replicate.** The +0.0095 valid-play gain over
+  impression count is +0.0009 (p 0.59) on held-out users, and is withdrawn.
+
+Details: [engineering log §18–§19](docs/engineering_log.md).
 
 ## Dataset
 

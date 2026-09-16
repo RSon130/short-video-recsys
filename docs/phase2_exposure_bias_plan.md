@@ -1,7 +1,9 @@
 # Phase 2b: exposure bias on KuaiRand (pre-registration)
 
-**Status:** v2, 2026-09-15, after a fresh-context AI-agent review of the draft
-(changes listed at the end). No arm has been run. Once this file is committed,
+**Status:** RUN AND COMPLETE, 2026-09-15. Results are in engineering log §19;
+raw output in `datastore/processed/kuairand_exposure_bias.json`. The text below
+is the pre-registration as committed in `1ea2e90`, before the single test-user
+run; it is kept unchanged as the record. Once this file is committed,
 the thresholds are fixed. Test users are scored exactly once, by
 `scripts/exposure_bias_kuairand.py`.
 
