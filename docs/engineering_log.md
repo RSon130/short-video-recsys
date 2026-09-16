@@ -627,6 +627,96 @@ A3s wins with **2.8× fewer positives** (13,578 vs 38,023).
 
 ---
 
+## 20. The same model on logged vs randomly-exposed evaluation
+
+Descriptive, not a decision. `docs/phase2_exposure_bias_plan.md` reserved the
+standard log 4/22–5/08 as a contrast set never used for decisions; this is that
+contrast. No §19 verdict depends on it. Code:
+`scripts/exposed_vs_unbiased.py`.
+
+**The question.** Most offline reports evaluate on the recommender's own logged
+traffic. What does that setup say about a model that an exposure-unbiased
+evaluation found no better than a baseline?
+
+Same model (A0, three seeds averaged), same features, same metric, test users,
+tabs 1–2, both evaluation sets drawn from 4/22–5/08.
+
+**First answer, and why it is wrong.** Against the impression-count comparator
+N1, the model looks far better on logged traffic:
+
+| label | logged A0 − N1 | unbiased A0 − N1 |
+|---|---|---|
+| valid play | +0.080 | +0.002 (ns) |
+| long view | +0.092 | +0.003 (ns) |
+| explicit feedback | +0.212 | +0.005 (ns) |
+| like | +0.250 | +0.025 (fails Holm) |
+
+A fresh-context AI-agent review showed **78–96% of that gap is the comparator
+failing, not the model succeeding.** N1 scores *below chance* on logged explicit
+feedback (0.428, 0.416) — the §19 sign flip — so the model is beating an
+inverted yardstick. Against a fair non-personal comparator, the item positive
+rate from the training window, the same rows give:
+
+| label | logged A0 − item rate | duration-demeaned |
+|---|---|---|
+| valid play | +0.0180 [+0.0147, +0.0210] | +0.0140 |
+| long view | +0.0171 [+0.0139, +0.0206] | +0.0093 |
+| explicit feedback | +0.0162 [+0.0068, +0.0256] | **−0.0001** |
+| like | +0.0105 [+0.0004, +0.0203] | **−0.0044** |
+
+On explicit feedback the model's advantage over a fair baseline on logged
+traffic is **zero once duration is controlled**.
+
+**What actually varies is which baseline is strong.**
+
+| comparator | logged | unbiased |
+|---|---|---|
+| item impression count (N1), explicit | 0.428 | 0.549 |
+| item positive rate, explicit | 0.624 | 0.546 |
+| item positive rate, valid play | 0.579 | 0.527 |
+| impression count, valid play | 0.517 | 0.575 |
+
+Popularity is anti-predictive on logged traffic and the strongest non-personal
+scorer under random exposure; the item rate is the reverse. **A model beats
+whichever baseline is weak in the world it is scored in, and barely beats the
+strong one in either.** The lesson is about baseline choice, not model quality.
+
+**Why the two evaluations are not a controlled comparison** (from the review):
+- Candidate pools differ: median item impressions 358 logged vs 29 unbiased,
+  and about 25% of unbiased rows are items the logged pool effectively never
+  shows.
+- Rows per user: 9.3 vs 43.6.
+- The evaluable-user sets barely overlap on explicit labels — Jaccard 0.18, with
+  613 of 2,096 logged users also in the unbiased 2,016.
+- Restricting both to a common, well-exposed item pool puts A0 **+0.0215
+  [+0.0052, +0.0382]** over the best non-personal comparator on the *unbiased*
+  log. So part of "the gap disappears under random exposure" is a harder,
+  longer-tailed candidate pool, not exposure alone. That re-analysis is post
+  hoc on already-scored test users and is a hypothesis, not a result.
+- The unbiased explicit CIs are ±0.019, so they cannot separate "no gap" from
+  "a gap of +0.016".
+
+**Not leakage.** Repeat user–item rates in the evaluation windows are 1.2%
+(logged) and 0.05% (unbiased). Within-user Spearman between A0 and N1 is
++0.14/+0.19 on watch labels and −0.21/−0.24 on explicit ones: the model has
+learned the flip rather than mimicking exposure volume. The logged gap is flat
+across impression terciles (+0.093/+0.092/+0.094 on valid play).
+
+**What is claimable from this section**
+- On logged traffic, a popularity baseline can be worse than chance, so a model
+  that beats it by +0.21 may be beating nothing.
+- Against a fair baseline the same model gains +0.017 on watch-time labels and
+  nothing on explicit feedback once duration is controlled.
+- Which non-personal baseline is "fair" depends on the exposure distribution
+  the evaluation is drawn from.
+
+**Not claimable:** that the standard evaluation "credits the model" with
++0.08–0.25 — it discredits the comparator; or that the unbiased gap is zero —
+it is not detectable at this power, and a pool-matched re-analysis points the
+other way.
+
+---
+
 ## How a pair is labelled
 
 *"How do you decide one item is better than another?"* — the model never
