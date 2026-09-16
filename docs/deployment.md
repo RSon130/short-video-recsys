@@ -57,14 +57,22 @@ the end of this file), which is what the Cloud Run console displays:
 
 | | p50 | p95 | p99 |
 |---|---|---|---|
-| **Cloud Run request latency** | **5.0 ms** | **9.6 ms** | 10.0 ms |
+| phase 1, two-stage `/recommend` (revision 00002) | 5.0 ms | **9.6 ms** | 10.0 ms |
+| **phase 2, `/recommend/kuairand` (revision 00003)** | 5.0 ms | **9.56 ms** | 9.9 ms |
 
 This is the number to report. It measures the service as the platform sees it —
 no client network, and not the application timing itself.
 
-**App self-reported p95: 2.4-2.8 ms.** That is the handler path — FAISS over 9,958 items,
-feature assembly for 200 candidates, one batched ranker forward pass — and it is
-the number that describes the system. Everything else is network.
+**App self-reported p95:** 2.4-2.8 ms on the phase 1 path (FAISS over 9,958
+items, feature assembly for 200 candidates, one batched ranker forward pass);
+**0.5 ms** on the phase 2 path, which is a slice of a pre-sorted 7,583-item
+array plus a seen-items filter. Everything else is network.
+
+The two paths are within noise of each other at the platform level despite a
+5x difference in handler cost, which is the point: at this scale the request is
+dominated by network and platform overhead, not by scoring. Re-measured
+2026-09-16 over 1,000 requests (500 cold, 500 warm) from a laptop client;
+client-side p95 was 62 ms, essentially all of it the round trip to us-central1.
 
 ### The warm phase is *slower*, and that is the finding
 

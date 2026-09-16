@@ -107,6 +107,11 @@ ran:
   data, so it measures train/evaluation match, not a better model.
 - **A Phase 0 result did not replicate.** The +0.0095 valid-play gain over
   impression count is +0.0009 (p 0.59) on held-out users, and is withdrawn.
+- **Shipped anyway, and said what shipped.** The pre-registered rule was to
+  deploy whichever scorer won, baseline or not, so Cloud Run now serves the
+  impression-count scorer at `POST /recommend/kuairand`; `GET /scorer` returns
+  the measured numbers behind that choice. Cloud-side p95 **9.56 ms**
+  (handler 0.5 ms).
 
 Details: [engineering log §18–§19](docs/engineering_log.md).
 

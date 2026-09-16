@@ -41,11 +41,14 @@ DEFAULT_URL = "http://api:8000"
 PROCESSED = Path("datastore/processed")
 
 
-def load_user_ids(limit=None):
-    """Raw dataset user ids the API will recognise (it maps raw -> internal)."""
-    with open(PROCESSED / "id_maps.pkl", "rb") as f:
-        id_maps = pickle.load(f)
-    ids = sorted(id_maps["user_id_map"].keys())
+def load_user_ids(limit=None, endpoint="/recommend"):
+    """User ids the API will recognise, for whichever scorer is being tested."""
+    if endpoint == "/recommend/kuairand":
+        import numpy as np
+        ids = np.load(Path("datastore/serving") / "kuairand_seen.npz")["users"].tolist()
+    else:
+        with open(PROCESSED / "id_maps.pkl", "rb") as f:
+            ids = sorted(pickle.load(f)["user_id_map"].keys())
     return ids[:limit] if limit else ids
 
 
@@ -58,11 +61,11 @@ def percentile(values, p):
     return ordered[k]
 
 
-def one_request(client, url, user_id, top_k):
+def one_request(client, url, user_id, top_k, endpoint="/recommend"):
     """Return (latency_ms measured client-side, server-reported latency_ms)."""
     t0 = time.perf_counter()
     response = client.post(
-        f"{url}/recommend",
+        f"{url}{endpoint}",
         json={"user_id": int(user_id), "top_k": top_k},
         timeout=30.0,
     )
@@ -71,12 +74,12 @@ def one_request(client, url, user_id, top_k):
     return elapsed_ms, response.json().get("latency_ms")
 
 
-def run_phase(url, user_ids, top_k, concurrency):
+def run_phase(url, user_ids, top_k, concurrency, endpoint="/recommend"):
     """Fire one request per user id, `concurrency` at a time."""
     latencies, server_latencies = [], []
     with httpx.Client() as client:
         def task(uid):
-            return one_request(client, url, uid, top_k)
+            return one_request(client, url, uid, top_k, endpoint)
 
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
             t0 = time.perf_counter()
@@ -126,9 +129,13 @@ def main():
     parser.add_argument("--warm-users", type=int, default=10,
                         help="distinct users reused in the warm phase")
     parser.add_argument("--out", default=None, help="write results as JSON")
+    parser.add_argument("--endpoint", default="/recommend",
+                        choices=["/recommend", "/recommend/kuairand"],
+                        help="/recommend is the phase 1 two-stage path; "
+                             "/recommend/kuairand is the scorer phase 2 deployed")
     args = parser.parse_args()
 
-    user_ids = load_user_ids()
+    user_ids = load_user_ids(endpoint=args.endpoint)
     if args.requests > len(user_ids):
         raise SystemExit(
             f"--requests {args.requests} exceeds the {len(user_ids)} known users; "
@@ -141,13 +148,13 @@ def main():
           f"concurrency {args.concurrency}")
 
     cold_users = user_ids[:args.requests]
-    cold = run_phase(args.url, cold_users, args.top_k, args.concurrency)
+    cold = run_phase(args.url, cold_users, args.top_k, args.concurrency, args.endpoint)
     cold_stats = summarise("COLD — distinct users, every request misses the cache",
                            *cold)
 
     warm_pool = user_ids[:args.warm_users]
     warm_users = [warm_pool[i % len(warm_pool)] for i in range(args.requests)]
-    warm = run_phase(args.url, warm_users, args.top_k, args.concurrency)
+    warm = run_phase(args.url, warm_users, args.top_k, args.concurrency, args.endpoint)
     hit_rate = 1 - (len(warm_pool) / len(warm_users))
     warm_stats = summarise(
         f"WARM — {args.warm_users} users reused, ~{hit_rate:.0%} cache hits", *warm
