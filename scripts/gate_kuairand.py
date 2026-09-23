@@ -60,7 +60,7 @@ Amendments (2026-09-15, before any validation run)
     rows; newest-first and item age dropped; dedup on (user, video, time_ms).
 
 Bug-fix re-runs (after run 1, disclosed; verdict rule unchanged)
-  Run 1 (design commit 50aae84): NO-GO. A fresh-context AI-agent review of the
+  Run 1 (design commit 7a43943): NO-GO. A fresh-context AI-agent review of the
   result surfaced that video_features_basic has NaN video_duration for 239
   items (3.1% of random rows). NaN scores corrupted the shortest- and
   longest-first per-user AUCs.

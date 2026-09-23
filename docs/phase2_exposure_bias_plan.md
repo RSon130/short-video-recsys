@@ -2,7 +2,7 @@
 
 **Status:** RUN AND COMPLETE, 2026-09-15. Results are in engineering log §19;
 raw output in `datastore/processed/kuairand_exposure_bias.json`. The text below
-is the pre-registration as committed in `1ea2e90`, before the single test-user
+is the pre-registration as committed in `7fe737f`, before the single test-user
 run; it is kept unchanged as the record. Once this file is committed,
 the thresholds are fixed. Test users are scored exactly once, by
 `scripts/exposure_bias_kuairand.py`.

@@ -13,6 +13,12 @@ deployed, and gave every user the same feed.
 
 ---
 
+> **Commit hashes in this log were rewritten on 2026-09-21**, when three private
+> planning documents were removed from the repository history before it was
+> published. Hashes cited below are the post-rewrite ones. Author dates were
+> preserved, so the order of events — including every pre-registration
+> committed before its result — can still be checked with `git log`.
+
 ## 1. Dataset download was fabricated
 
 `scripts/download_kuairec.py` fetched per-file URLs from an Aliyun OSS bucket.
@@ -408,7 +414,7 @@ and duration are controlled?
   - `upload_dt` has three values.
 
 **Gate design.** Pre-registered in the script docstring and committed
-(`50aae84`) before the validation run. A fresh-context AI-agent review of the
+(`7a43943`) before the validation run. A fresh-context AI-agent review of the
 design replaced three things before any validation run:
 - noisy early stopping → 300 fixed rounds;
 - 94K fit rows → 344K via expanding daily cutoffs;
@@ -497,7 +503,7 @@ exposure-unbiased, pre-registered tests:
 
 ## 19. Phase 2b: exposure bias, run once on held-out users
 
-Pre-registered in `docs/phase2_exposure_bias_plan.md`, committed (`1ea2e90`)
+Pre-registered in `docs/phase2_exposure_bias_plan.md`, committed (`7fe737f`)
 before the run. Code: `scripts/exposure_bias_kuairand.py`. Two fresh-context
 AI-agent reviews ran before the experiment (design, then code) and one after
 (results). Test users were scored exactly once.
